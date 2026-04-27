@@ -7,33 +7,13 @@ from app.services.auth import api_post, api_get, TENANT_URL, FACILITY_CODE
 
 
 def fetch_facilities() -> list[str]:
-    try:
-        url  = f"{TENANT_URL}/services/rest/v1/facility/search"
-        data = api_post(url, {})
-        if data.get("successful"):
-            facilities = data.get("facilities", [])
-            codes = [f["code"] for f in facilities if f.get("code")]
-            if codes:
-                print(f"✓ Found {len(codes)} facilities: {codes}")
-                return codes
-    except Exception as e:
-        print(f"⚠ facility/search failed: {e}")
-
-    try:
-        url  = f"{TENANT_URL}/services/rest/v1/facility/get"
-        data = api_post(url, {})
-        if data.get("successful"):
-            facilities = data.get("facilities", [])
-            codes = [f["code"] for f in facilities if f.get("code")]
-            if codes:
-                return codes
-    except Exception as e:
-        print(f"⚠ facility/get failed: {e}")
-
-    if FACILITY_CODE:
-        return [FACILITY_CODE]
-
-    raise Exception("Could not determine facility code. Set UNIWARE_FACILITY_CODE in environment variables.")
+    # Hardcoded BeastLife facility codes
+    return [
+        "Emiza_B2C_BLR",
+        "Emiza_B2C_GGN",
+        "Emiza_B2C_Mumbai",
+        "Emiza_B2C_WB",
+    ]
 
 
 def fetch_inventory(
