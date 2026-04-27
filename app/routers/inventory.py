@@ -3,9 +3,19 @@ from typing import Optional
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from app.services.inventory import fetch_inventory, build_inventory_excel
+from app.services.inventory import fetch_inventory, build_inventory_excel, fetch_facilities
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
+
+
+@router.get("/facilities")
+def list_facilities():
+    """List all facility codes accessible to this account."""
+    try:
+        codes = fetch_facilities()
+        return JSONResponse(content={"count": len(codes), "facilities": codes})
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/fetch")
@@ -15,9 +25,9 @@ def get_inventory(
     skus: Optional[str] = Query(None, description="Comma-separated SKU codes e.g. SKU001,SKU002"),
 ):
     """
-    Fetch inventory snapshot from Unicommerce.
+    Fetch inventory snapshot from Unicommerce across all facilities.
 
-    - **format=json** → raw JSON (default, good for Google Sheets)
+    - **format=json** → raw JSON (default)
     - **format=excel** → downloadable .xlsx file
     - **updated_since_minutes** → only recently changed SKUs
     - **skus** → filter to specific SKUs
@@ -25,7 +35,10 @@ def get_inventory(
     sku_list = [s.strip() for s in skus.split(",")] if skus else None
 
     try:
-        records = fetch_inventory(updated_since_minutes=updated_since_minutes, sku_list=sku_list)
+        records = fetch_inventory(
+            updated_since_minutes=updated_since_minutes,
+            sku_list=sku_list,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 

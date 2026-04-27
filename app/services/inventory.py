@@ -3,25 +3,66 @@ from typing import Optional
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
-from app.services.auth import api_post, TENANT_URL
+from app.services.auth import api_post, api_get, TENANT_URL, FACILITY_CODE
+
+
+def fetch_facilities() -> list[str]:
+    """Return list of facility codes available to this user."""
+    try:
+        url  = f"{TENANT_URL}/services/rest/v1/facility/list"
+        data = api_get(url)
+        if data.get("successful"):
+            facilities = data.get("facilities", [])
+            codes = [f["code"] for f in facilities if f.get("code")]
+            print(f"✓ Found {len(codes)} facilities: {codes}")
+            return codes
+    except Exception as e:
+        print(f"⚠ Could not fetch facilities: {e}")
+
+    # Fallback to env var or empty
+    if FACILITY_CODE:
+        return [FACILITY_CODE]
+    return []
 
 
 def fetch_inventory(
     updated_since_minutes: Optional[int] = None,
     sku_list: Optional[list[str]] = None,
 ) -> list[dict]:
-    url     = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
-    payload = {}
-    if sku_list:
-        payload["itemTypeSKUs"] = sku_list
-    if updated_since_minutes:
-        payload["updatedSinceInMinutes"] = updated_since_minutes
+    url            = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
+    facility_codes = fetch_facilities()
 
-    data = api_post(url, payload)
-    if not data.get("successful"):
-        raise Exception(f"Unicommerce error: {data.get('message')} | {data.get('errors')}")
+    if not facility_codes:
+        raise Exception("No facility codes found. Set UNIWARE_FACILITY_CODE in env or ensure the user has facility access.")
 
-    return data.get("inventorySnapShotList", [])
+    all_records = []
+    seen_keys   = set()
+
+    for code in facility_codes:
+        payload = {"facilityCode": code}
+        if sku_list:
+            payload["itemTypeSKUs"] = sku_list
+        if updated_since_minutes:
+            payload["updatedSinceInMinutes"] = updated_since_minutes
+
+        try:
+            data = api_post(url, payload)
+            if data.get("successful"):
+                records = data.get("inventorySnapShotList", [])
+                for r in records:
+                    key = f"{r.get('itemTypeSKU')}_{code}"
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        r["facilityCode"] = code
+                        all_records.append(r)
+                print(f"  ✓ Facility {code}: {len(records)} SKUs")
+            else:
+                print(f"  ⚠ Facility {code}: {data.get('message')}")
+        except Exception as e:
+            print(f"  ⚠ Facility {code} failed: {e}")
+            continue
+
+    return all_records
 
 
 def build_inventory_excel(records: list[dict]) -> bytes:
@@ -56,6 +97,12 @@ def build_inventory_excel(records: list[dict]) -> bytes:
         ws.cell(row=row_idx, column=8, value=item.get("virtualInventory", 0))
         ws.cell(row=row_idx, column=9, value=item.get("updatedAt"))
 
+        # Alternating row colors
+        fill_color = "EBF3FB" if row_idx % 2 == 0 else "FFFFFF"
+        row_fill   = PatternFill("solid", start_color=fill_color)
+        for col in range(1, 10):
+            ws.cell(row=row_idx, column=col).fill = row_fill
+
     col_widths = [18, 30, 16, 14, 14, 16, 16, 18, 22]
     for col, width in enumerate(col_widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
@@ -64,6 +111,9 @@ def build_inventory_excel(records: list[dict]) -> bytes:
     ws.cell(row=last, column=1, value="TOTAL").font = Font(bold=True, name="Arial")
     ws.cell(row=last, column=4, value=f"=SUM(D2:D{last-1})")
     ws.cell(row=last, column=5, value=f"=SUM(E2:E{last-1})")
+    total_fill = PatternFill("solid", start_color="D6E4F0")
+    for col in range(1, 10):
+        ws.cell(row=last, column=col).fill = total_fill
 
     buf = io.BytesIO()
     wb.save(buf)

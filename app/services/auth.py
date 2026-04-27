@@ -10,13 +10,11 @@ PASSWORD      = os.getenv("UNIWARE_PASSWORD")
 CLIENT_ID     = os.getenv("UNIWARE_CLIENT_ID", "my-trusted-client")
 FACILITY_CODE = os.getenv("UNIWARE_FACILITY_CODE", "")
 
-# In-memory token state
 _access_token  = os.getenv("UNIWARE_ACCESS_TOKEN", "")
 _refresh_token = os.getenv("UNIWARE_REFRESH_TOKEN", "")
 
-# Only persist to .env when running locally (file exists)
-_ENV_PATH = ".env"
-_HAS_ENV_FILE = os.path.isfile(_ENV_PATH)
+_ENV_PATH      = ".env"
+_HAS_ENV_FILE  = os.path.isfile(_ENV_PATH)
 
 
 def _save_tokens(access: str, refresh: str) -> None:
@@ -72,30 +70,42 @@ def get_valid_token() -> str:
     return fetch_token_with_password()
 
 
-def get_headers() -> dict:
+def _headers() -> dict:
     global _access_token
     if not _access_token:
         _access_token = get_valid_token()
-    headers = {
+    return {
         "Content-Type":  "application/json",
         "Authorization": f"Bearer {_access_token}",
     }
-    if FACILITY_CODE:
-        headers["Facility"] = FACILITY_CODE
-    return headers
 
 
 def api_post(url: str, payload: dict) -> dict:
     global _access_token
 
-    resp = requests.post(url, json=payload, headers=get_headers(), timeout=60)
+    resp = requests.post(url, json=payload, headers=_headers(), timeout=60)
 
     if resp.status_code == 401:
         print("Token rejected — refreshing...")
         _access_token = get_valid_token()
-        resp = requests.post(url, json=payload, headers=get_headers(), timeout=60)
+        resp = requests.post(url, json=payload, headers=_headers(), timeout=60)
 
-    # Surface readable error before raising
+    if not resp.ok:
+        raise Exception(f"HTTP {resp.status_code} from Unicommerce: {resp.text[:300]}")
+
+    return resp.json()
+
+
+def api_get(url: str, params: dict = None) -> dict:
+    global _access_token
+
+    resp = requests.get(url, params=params, headers=_headers(), timeout=60)
+
+    if resp.status_code == 401:
+        print("Token rejected — refreshing...")
+        _access_token = get_valid_token()
+        resp = requests.get(url, params=params, headers=_headers(), timeout=60)
+
     if not resp.ok:
         raise Exception(f"HTTP {resp.status_code} from Unicommerce: {resp.text[:300]}")
 
