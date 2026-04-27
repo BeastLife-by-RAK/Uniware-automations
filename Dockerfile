@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 COPY pyproject.toml .
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" requests openpyxl python-dotenv
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" requests openpyxl python-dotenv python-multipart
 
 COPY app/ ./app/
 
