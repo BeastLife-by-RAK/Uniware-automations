@@ -80,15 +80,24 @@ def _headers() -> dict:
     }
 
 
-def api_post(url: str, payload: dict) -> dict:
+def api_post(url: str, payload: dict, facility: str = None) -> dict:
     global _access_token
 
-    resp = requests.post(url, json=payload, headers=_headers(), timeout=60)
+    def _hdrs():
+        h = {
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {_access_token}",
+        }
+        if facility:
+            h["Facility"] = facility
+        return h
+
+    resp = requests.post(url, json=payload, headers=_hdrs(), timeout=60)
 
     if resp.status_code == 401:
         print("Token rejected — refreshing...")
         _access_token = get_valid_token()
-        resp = requests.post(url, json=payload, headers=_headers(), timeout=60)
+        resp = requests.post(url, json=payload, headers=_hdrs(), timeout=60)
 
     if not resp.ok:
         raise Exception(f"HTTP {resp.status_code} from Unicommerce: {resp.text[:300]}")

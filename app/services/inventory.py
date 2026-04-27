@@ -23,21 +23,19 @@ def fetch_inventory(
     url            = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
     facility_codes = fetch_facilities()
 
-    if not facility_codes:
-        raise Exception("No facility codes found. Set UNIWARE_FACILITY_CODE in env or ensure the user has facility access.")
-
     all_records = []
     seen_keys   = set()
 
     for code in facility_codes:
-        payload = {"facilityCode": code}
+        payload = {}
         if sku_list:
             payload["itemTypeSKUs"] = sku_list
         if updated_since_minutes:
             payload["updatedSinceInMinutes"] = updated_since_minutes
 
         try:
-            data = api_post(url, payload)
+            # Pass facility code in header, not payload
+            data = api_post(url, payload, facility=code)
             if data.get("successful"):
                 records = data.get("inventorySnapShotList", [])
                 for r in records:
