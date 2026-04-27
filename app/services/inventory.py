@@ -6,13 +6,16 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from app.services.auth import api_post, api_get, TENANT_URL, FACILITY_CODE
 
 
+FACILITY_MAP = {
+    "Emiza_B2C_BLR":    "Bangalore",
+    "Emiza_B2C_GGN":    "Gurugram",
+    "Emiza_B2C_Mumbai": "Mumbai",
+    "Emiza_B2C_WB":     "West Bengal",
+}
+
+
 def fetch_facilities() -> list[str]:
-    return [
-        "Emiza_B2C_BLR",
-        "Emiza_B2C_GGN",
-        "Emiza_B2C_Mumbai",
-        "Emiza_B2C_WB",
-    ]
+    return list(FACILITY_MAP.keys())
 
 
 def fetch_inventory(
@@ -22,7 +25,6 @@ def fetch_inventory(
     url            = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
     facility_codes = fetch_facilities()
 
-    # Default to last 24 hours if no filter provided
     if not updated_since_minutes and not sku_list:
         updated_since_minutes = 1440
 
@@ -39,8 +41,6 @@ def fetch_inventory(
         try:
             data = api_post(url, payload, facility=code)
 
-            print(f"  Raw response for {code}: {str(data)[:500]}")
-
             if data.get("successful"):
                 records = (
                     data.get("inventorySnapshots")
@@ -51,9 +51,10 @@ def fetch_inventory(
                     key = f"{r.get('itemTypeSKU')}_{code}"
                     if key not in seen_keys:
                         seen_keys.add(key)
-                        r["facilityCode"] = code
+                        r["facilityCode"]     = code
+                        r["facilityLocation"] = FACILITY_MAP.get(code, code)
                         all_records.append(r)
-                print(f"  ✓ Facility {code}: {len(records)} SKUs")
+                print(f"  ✓ Facility {code} ({FACILITY_MAP.get(code)}): {len(records)} SKUs")
             else:
                 print(f"  ⚠ Facility {code}: {data.get('message')} | errors: {data.get('errors')}")
 
@@ -75,43 +76,71 @@ def build_inventory_excel(records: list[dict]) -> bytes:
     center_align = Alignment(horizontal="center", vertical="center")
 
     headers = [
-        "SKU Code", "Item Name", "Facility Code",
-        "Sellable Qty", "Blocked Qty", "Pending Putaway",
-        "Bad Inventory", "Virtual Inventory", "Updated At",
+        "SKU Code",
+        "Facility Code",
+        "Location",
+        "Sellable Qty",
+        "Open Sale",
+        "Open Purchase",
+        "Putaway Pending",
+        "Blocked Qty",
+        "Pending Stock Transfer",
+        "Vendor Inventory",
+        "Virtual Inventory",
+        "Pending Assessment",
+        "Bad Inventory",
+        "Inventory Not Synced",
+        "Batch Recall Qty",
     ]
+
     for col, h in enumerate(headers, start=1):
         cell           = ws.cell(row=1, column=col, value=h)
         cell.font      = header_font
         cell.fill      = header_fill
         cell.alignment = center_align
-    ws.row_dimensions[1].height = 20
+    ws.row_dimensions[1].height = 22
 
     for row_idx, item in enumerate(records, start=2):
-        ws.cell(row=row_idx, column=1, value=item.get("itemTypeSKU"))
-        ws.cell(row=row_idx, column=2, value=item.get("itemName"))
-        ws.cell(row=row_idx, column=3, value=item.get("facilityCode"))
-        ws.cell(row=row_idx, column=4, value=item.get("inventory", 0))
-        ws.cell(row=row_idx, column=5, value=item.get("blockedInventory", 0))
-        ws.cell(row=row_idx, column=6, value=item.get("pendingPutawayInventory", 0))
-        ws.cell(row=row_idx, column=7, value=item.get("badInventory", 0))
-        ws.cell(row=row_idx, column=8, value=item.get("virtualInventory", 0))
-        ws.cell(row=row_idx, column=9, value=item.get("updatedAt"))
+        ws.cell(row=row_idx, column=1,  value=item.get("itemTypeSKU"))
+        ws.cell(row=row_idx, column=2,  value=item.get("facilityCode"))
+        ws.cell(row=row_idx, column=3,  value=item.get("facilityLocation"))
+        ws.cell(row=row_idx, column=4,  value=item.get("inventory", 0))
+        ws.cell(row=row_idx, column=5,  value=item.get("openSale", 0))
+        ws.cell(row=row_idx, column=6,  value=item.get("openPurchase", 0))
+        ws.cell(row=row_idx, column=7,  value=item.get("putawayPending", 0))
+        ws.cell(row=row_idx, column=8,  value=item.get("inventoryBlocked", 0))
+        ws.cell(row=row_idx, column=9,  value=item.get("pendingStockTransfer", 0))
+        ws.cell(row=row_idx, column=10, value=item.get("vendorInventory", 0))
+        ws.cell(row=row_idx, column=11, value=item.get("virtualInventory", 0))
+        ws.cell(row=row_idx, column=12, value=item.get("pendingInventoryAssessment", 0))
+        ws.cell(row=row_idx, column=13, value=item.get("badInventory", 0))
+        ws.cell(row=row_idx, column=14, value=item.get("inventoryNotSynced", 0))
+        ws.cell(row=row_idx, column=15, value=item.get("batchRecallQuantity", 0))
 
         fill_color = "EBF3FB" if row_idx % 2 == 0 else "FFFFFF"
         row_fill   = PatternFill("solid", start_color=fill_color)
-        for col in range(1, 10):
+        for col in range(1, 16):
             ws.cell(row=row_idx, column=col).fill = row_fill
 
-    col_widths = [18, 30, 16, 14, 14, 16, 16, 18, 22]
+    col_widths = [16, 18, 14, 12, 10, 14, 14, 12, 22, 16, 16, 18, 14, 18, 16]
     for col, width in enumerate(col_widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
 
     last = len(records) + 2
-    ws.cell(row=last, column=1, value="TOTAL").font = Font(bold=True, name="Arial")
-    ws.cell(row=last, column=4, value=f"=SUM(D2:D{last-1})")
-    ws.cell(row=last, column=5, value=f"=SUM(E2:E{last-1})")
     total_fill = PatternFill("solid", start_color="D6E4F0")
-    for col in range(1, 10):
+    total_font = Font(bold=True, name="Arial")
+    ws.cell(row=last, column=1, value="TOTAL").font = total_font
+
+    numeric_cols = {
+        4: "D", 5: "E", 6: "F", 7: "G", 8: "H",
+        9: "I", 10: "J", 11: "K", 12: "L", 13: "M",
+        14: "N", 15: "O"
+    }
+    for col_num, col_letter in numeric_cols.items():
+        ws.cell(row=last, column=col_num, value=f"=SUM({col_letter}2:{col_letter}{last-1})")
+        ws.cell(row=last, column=col_num).font = total_font
+
+    for col in range(1, 16):
         ws.cell(row=last, column=col).fill = total_fill
 
     ws.freeze_panes = "A2"
