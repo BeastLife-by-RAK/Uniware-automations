@@ -7,22 +7,33 @@ from app.services.auth import api_post, api_get, TENANT_URL, FACILITY_CODE
 
 
 def fetch_facilities() -> list[str]:
-    """Return list of facility codes available to this user."""
     try:
-        url  = f"{TENANT_URL}/services/rest/v1/facility/list"
-        data = api_get(url)
+        url  = f"{TENANT_URL}/services/rest/v1/facility/search"
+        data = api_post(url, {})
         if data.get("successful"):
             facilities = data.get("facilities", [])
             codes = [f["code"] for f in facilities if f.get("code")]
-            print(f"✓ Found {len(codes)} facilities: {codes}")
-            return codes
+            if codes:
+                print(f"✓ Found {len(codes)} facilities: {codes}")
+                return codes
     except Exception as e:
-        print(f"⚠ Could not fetch facilities: {e}")
+        print(f"⚠ facility/search failed: {e}")
 
-    # Fallback to env var or empty
+    try:
+        url  = f"{TENANT_URL}/services/rest/v1/facility/get"
+        data = api_post(url, {})
+        if data.get("successful"):
+            facilities = data.get("facilities", [])
+            codes = [f["code"] for f in facilities if f.get("code")]
+            if codes:
+                return codes
+    except Exception as e:
+        print(f"⚠ facility/get failed: {e}")
+
     if FACILITY_CODE:
         return [FACILITY_CODE]
-    return []
+
+    raise Exception("Could not determine facility code. Set UNIWARE_FACILITY_CODE in environment variables.")
 
 
 def fetch_inventory(
