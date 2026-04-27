@@ -16,3 +16,9 @@ app.include_router(po.router)
 @app.get("/health", tags=["Health"])
 def health():
     return JSONResponse(content={"status": "ok"})
+
+@app.get("/myip")
+def my_ip():
+    import requests
+    r = requests.get("https://api.ipify.org?format=json", timeout=10)
+    return r.json()
