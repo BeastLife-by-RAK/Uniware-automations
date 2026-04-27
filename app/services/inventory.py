@@ -22,6 +22,10 @@ def fetch_inventory(
     url            = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
     facility_codes = fetch_facilities()
 
+    # Default to last 24 hours if no filter provided
+    if not updated_since_minutes and not sku_list:
+        updated_since_minutes = 1440
+
     all_records = []
     seen_keys   = set()
 
@@ -35,11 +39,9 @@ def fetch_inventory(
         try:
             data = api_post(url, payload, facility=code)
 
-            # Log raw response for debugging
             print(f"  Raw response for {code}: {str(data)[:500]}")
 
             if data.get("successful"):
-                # Try both possible response keys
                 records = (
                     data.get("inventorySnapshots")
                     or data.get("inventorySnapShotList")

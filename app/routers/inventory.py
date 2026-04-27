@@ -10,7 +10,7 @@ router = APIRouter(prefix="/inventory", tags=["Inventory"])
 
 @router.get("/facilities")
 def list_facilities():
-    """List all facility codes accessible to this account."""
+    """List all facility codes."""
     try:
         codes = fetch_facilities()
         return JSONResponse(content={"count": len(codes), "facilities": codes})
@@ -21,15 +21,21 @@ def list_facilities():
 @router.get("/fetch")
 def get_inventory(
     format: str = Query("json", description="Response format: json or excel"),
-    updated_since_minutes: Optional[int] = Query(None, description="Only SKUs updated in last N minutes (max 1440)"),
-    skus: Optional[str] = Query(None, description="Comma-separated SKU codes e.g. SKU001,SKU002"),
+    updated_since_minutes: Optional[int] = Query(
+        1440,
+        description="Only SKUs updated in last N minutes. Default 1440 (24h). Max 1440."
+    ),
+    skus: Optional[str] = Query(
+        None,
+        description="Comma-separated SKU codes e.g. SKU001,SKU002"
+    ),
 ):
     """
     Fetch inventory snapshot from Unicommerce across all facilities.
 
     - **format=json** → raw JSON (default)
     - **format=excel** → downloadable .xlsx file
-    - **updated_since_minutes** → only recently changed SKUs
+    - **updated_since_minutes** → SKUs updated in last N minutes (default 1440 = 24h)
     - **skus** → filter to specific SKUs
     """
     sku_list = [s.strip() for s in skus.split(",")] if skus else None
