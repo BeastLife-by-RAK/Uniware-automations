@@ -13,8 +13,8 @@ FACILITY_CODE = os.getenv("UNIWARE_FACILITY_CODE", "")
 _access_token  = os.getenv("UNIWARE_ACCESS_TOKEN", "")
 _refresh_token = os.getenv("UNIWARE_REFRESH_TOKEN", "")
 
-_ENV_PATH      = ".env"
-_HAS_ENV_FILE  = os.path.isfile(_ENV_PATH)
+_ENV_PATH     = ".env"
+_HAS_ENV_FILE = os.path.isfile(_ENV_PATH)
 
 
 def _save_tokens(access: str, refresh: str) -> None:
@@ -70,34 +70,30 @@ def get_valid_token() -> str:
     return fetch_token_with_password()
 
 
-def _headers() -> dict:
+def _build_headers(facility: str = None) -> dict:
     global _access_token
     if not _access_token:
         _access_token = get_valid_token()
-    return {
+    headers = {
         "Content-Type":  "application/json",
         "Authorization": f"Bearer {_access_token}",
     }
+    if facility:
+        headers["Facility"] = facility
+    elif FACILITY_CODE:
+        headers["Facility"] = FACILITY_CODE
+    return headers
 
 
 def api_post(url: str, payload: dict, facility: str = None) -> dict:
     global _access_token
 
-    def _hdrs():
-        h = {
-            "Content-Type":  "application/json",
-            "Authorization": f"Bearer {_access_token}",
-        }
-        if facility:
-            h["Facility"] = facility
-        return h
-
-    resp = requests.post(url, json=payload, headers=_hdrs(), timeout=60)
+    resp = requests.post(url, json=payload, headers=_build_headers(facility), timeout=60)
 
     if resp.status_code == 401:
         print("Token rejected — refreshing...")
         _access_token = get_valid_token()
-        resp = requests.post(url, json=payload, headers=_hdrs(), timeout=60)
+        resp = requests.post(url, json=payload, headers=_build_headers(facility), timeout=60)
 
     if not resp.ok:
         raise Exception(f"HTTP {resp.status_code} from Unicommerce: {resp.text[:300]}")
@@ -105,15 +101,15 @@ def api_post(url: str, payload: dict, facility: str = None) -> dict:
     return resp.json()
 
 
-def api_get(url: str, params: dict = None) -> dict:
+def api_get(url: str, params: dict = None, facility: str = None) -> dict:
     global _access_token
 
-    resp = requests.get(url, params=params, headers=_headers(), timeout=60)
+    resp = requests.get(url, params=params, headers=_build_headers(facility), timeout=60)
 
     if resp.status_code == 401:
         print("Token rejected — refreshing...")
         _access_token = get_valid_token()
-        resp = requests.get(url, params=params, headers=_headers(), timeout=60)
+        resp = requests.get(url, params=params, headers=_build_headers(facility), timeout=60)
 
     if not resp.ok:
         raise Exception(f"HTTP {resp.status_code} from Unicommerce: {resp.text[:300]}")

@@ -7,7 +7,6 @@ from app.services.auth import api_post, api_get, TENANT_URL, FACILITY_CODE
 
 
 def fetch_facilities() -> list[str]:
-    # Hardcoded BeastLife facility codes
     return [
         "Emiza_B2C_BLR",
         "Emiza_B2C_GGN",
@@ -34,10 +33,18 @@ def fetch_inventory(
             payload["updatedSinceInMinutes"] = updated_since_minutes
 
         try:
-            # Pass facility code in header, not payload
             data = api_post(url, payload, facility=code)
+
+            # Log raw response for debugging
+            print(f"  Raw response for {code}: {str(data)[:500]}")
+
             if data.get("successful"):
-                records = data.get("inventorySnapShotList", [])
+                # Try both possible response keys
+                records = (
+                    data.get("inventorySnapshots")
+                    or data.get("inventorySnapShotList")
+                    or []
+                )
                 for r in records:
                     key = f"{r.get('itemTypeSKU')}_{code}"
                     if key not in seen_keys:
@@ -46,11 +53,13 @@ def fetch_inventory(
                         all_records.append(r)
                 print(f"  ✓ Facility {code}: {len(records)} SKUs")
             else:
-                print(f"  ⚠ Facility {code}: {data.get('message')}")
+                print(f"  ⚠ Facility {code}: {data.get('message')} | errors: {data.get('errors')}")
+
         except Exception as e:
             print(f"  ⚠ Facility {code} failed: {e}")
             continue
 
+    print(f"Total records across all facilities: {len(all_records)}")
     return all_records
 
 
@@ -86,7 +95,6 @@ def build_inventory_excel(records: list[dict]) -> bytes:
         ws.cell(row=row_idx, column=8, value=item.get("virtualInventory", 0))
         ws.cell(row=row_idx, column=9, value=item.get("updatedAt"))
 
-        # Alternating row colors
         fill_color = "EBF3FB" if row_idx % 2 == 0 else "FFFFFF"
         row_fill   = PatternFill("solid", start_color=fill_color)
         for col in range(1, 10):
@@ -103,6 +111,8 @@ def build_inventory_excel(records: list[dict]) -> bytes:
     total_fill = PatternFill("solid", start_color="D6E4F0")
     for col in range(1, 10):
         ws.cell(row=last, column=col).fill = total_fill
+
+    ws.freeze_panes = "A2"
 
     buf = io.BytesIO()
     wb.save(buf)
