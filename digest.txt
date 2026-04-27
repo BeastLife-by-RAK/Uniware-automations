@@ -1,0 +1,685 @@
+Directory structure:
+└── UniwareAutomations/
+    ├── README.md
+    ├── Dockerfile
+    ├── pyproject.toml
+    ├── .dockerignore
+    └── app/
+        ├── __init__.py
+        ├── main.py
+        ├── routers/
+        │   ├── __init__.py
+        │   ├── inventory.py
+        │   └── po.py
+        └── services/
+            ├── __init__.py
+            ├── auth.py
+            ├── inventory.py
+            └── po.py
+
+================================================
+FILE: README.md
+================================================
+# Uniware Automations API
+
+FastAPI wrapper for Unicommerce/Uniware â€” inventory fetch and PO upload as REST endpoints.
+Designed to be triggered from Excel (VBA) or Google Sheets (Apps Script).
+
+## Structure
+
+```
+app/
+â”œâ”€â”€ main.py
+â”œâ”€â”€ routers/
+â”‚   â”œâ”€â”€ inventory.py     # GET  /inventory/fetch
+â”‚   â””â”€â”€ po.py            # GET  /po/template, POST /po/upload
+â””â”€â”€ services/
+    â”œâ”€â”€ auth.py          # Token management, api_post
+    â”œâ”€â”€ inventory.py     # fetch + Excel builder
+    â””â”€â”€ po.py            # Excel parser, PO creator, results builder, template builder
+```
+
+## Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check |
+| GET | `/inventory/fetch?format=json` | Inventory as JSON |
+| GET | `/inventory/fetch?format=excel` | Inventory as .xlsx download |
+| GET | `/po/template` | Download blank PO Excel template |
+| POST | `/po/upload` | Upload filled template, create POs |
+| POST | `/po/upload?approve=true` | Create POs in APPROVED status |
+| POST | `/po/upload?dry_run=true` | Validate Excel without hitting Unicommerce |
+
+## Local Development
+
+```bash
+pip install fastapi "uvicorn[standard]" requests openpyxl python-dotenv
+uvicorn app.main:app --reload --port 8080
+# Swagger UI â†’ http://localhost:8080/docs
+```
+
+## .env
+
+```env
+UNIWARE_TENANT_URL=https://yourcompany.unicommerce.com
+UNIWARE_USERNAME=your@email.com
+UNIWARE_PASSWORD=yourpassword
+UNIWARE_CLIENT_ID=my-trusted-client
+UNIWARE_FACILITY_CODE=
+UNIWARE_ACCESS_TOKEN=
+UNIWARE_REFRESH_TOKEN=
+```
+
+> On Cloud Run, set these as environment variables or Secret Manager secrets.
+> Token persistence to .env is skipped automatically when no .env file is present (e.g. Cloud Run).
+
+## Deploy to GCP Cloud Run
+
+```bash
+# Build & push
+gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/uniware-api
+
+# Deploy
+gcloud run deploy uniware-api \
+  --image gcr.io/YOUR_PROJECT_ID/uniware-api \
+  --platform managed \
+  --region asia-south1 \
+  --allow-unauthenticated \
+  --set-env-vars UNIWARE_TENANT_URL=https://yourcompany.unicommerce.com \
+  --set-env-vars UNIWARE_USERNAME=your@email.com \
+  --set-env-vars UNIWARE_PASSWORD=yourpassword \
+  --set-env-vars UNIWARE_CLIENT_ID=my-trusted-client
+```
+
+
+
+================================================
+FILE: Dockerfile
+================================================
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" requests openpyxl python-dotenv
+
+COPY app/ ./app/
+
+EXPOSE 8080
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+
+
+================================================
+FILE: pyproject.toml
+================================================
+[project]
+name = "uniwareautomations"
+version = "1.0.0"
+description = "FastAPI wrapper for Unicommerce/Uniware APIs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "requests>=2.33.0",
+    "openpyxl>=3.1.5",
+    "python-dotenv>=1.2.0",
+]
+
+
+
+================================================
+FILE: .dockerignore
+================================================
+.env
+.venv
+__pycache__
+*.pyc
+*.pyo
+.python-version
+*.xlsx
+
+
+
+================================================
+FILE: app/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: app/main.py
+================================================
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+from app.routers import inventory, po
+
+app = FastAPI(
+    title="Uniware Automations API",
+    description="REST API wrapper for Unicommerce/Uniware â€” inventory fetch and purchase order upload.",
+    version="1.0.0",
+)
+
+app.include_router(inventory.router)
+app.include_router(po.router)
+
+
+@app.get("/health", tags=["Health"])
+def health():
+    return JSONResponse(content={"status": "ok"})
+
+
+
+================================================
+FILE: app/routers/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: app/routers/inventory.py
+================================================
+import io
+from typing import Optional
+from fastapi import APIRouter, Query, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
+
+from app.services.inventory import fetch_inventory, build_inventory_excel
+
+router = APIRouter(prefix="/inventory", tags=["Inventory"])
+
+
+@router.get("/fetch")
+def get_inventory(
+    format: str = Query("json", description="Response format: json or excel"),
+    updated_since_minutes: Optional[int] = Query(None, description="Only SKUs updated in last N minutes (max 1440)"),
+    skus: Optional[str] = Query(None, description="Comma-separated SKU codes e.g. SKU001,SKU002"),
+):
+    """
+    Fetch inventory snapshot from Unicommerce.
+
+    - **format=json** â†’ raw JSON (default, good for Google Sheets)
+    - **format=excel** â†’ downloadable .xlsx file
+    - **updated_since_minutes** â†’ only recently changed SKUs
+    - **skus** â†’ filter to specific SKUs
+    """
+    sku_list = [s.strip() for s in skus.split(",")] if skus else None
+
+    try:
+        records = fetch_inventory(updated_since_minutes=updated_since_minutes, sku_list=sku_list)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if format == "excel":
+        return StreamingResponse(
+            io.BytesIO(build_inventory_excel(records)),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=inventory_snapshot.xlsx"},
+        )
+
+    return JSONResponse(content={"count": len(records), "records": records})
+
+
+
+================================================
+FILE: app/routers/po.py
+================================================
+import io
+from fastapi import APIRouter, UploadFile, File, Query, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
+
+from app.services.po import parse_po_excel, create_purchase_orders, build_results_excel, build_po_template
+
+router = APIRouter(prefix="/po", tags=["Purchase Orders"])
+
+
+@router.get("/template")
+def download_po_template():
+    """Download a blank Excel template with PO Header and PO Items sheets."""
+    return StreamingResponse(
+        io.BytesIO(build_po_template()),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=po_template.xlsx"},
+    )
+
+
+@router.post("/upload")
+async def upload_purchase_orders(
+    file: UploadFile = File(..., description="Filled PO Excel (PO Header + PO Items sheets)"),
+    approve: bool    = Query(False, description="Create POs in APPROVED status directly"),
+    dry_run: bool    = Query(False, description="Parse only â€” no API call to Unicommerce"),
+):
+    """
+    Upload a filled PO Excel to create Purchase Orders in Unicommerce.
+
+    Returns a downloadable Excel with per-PO SUCCESS / FAILED / SKIPPED results.
+    Use **dry_run=true** to validate your Excel before submitting.
+    """
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Only .xlsx or .xls files accepted")
+
+    file_bytes = await file.read()
+
+    try:
+        po_list, skipped = parse_po_excel(file_bytes)
+    except KeyError as e:
+        raise HTTPException(status_code=400, detail=f"Missing sheet or column: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse Excel: {e}")
+
+    if not po_list:
+        raise HTTPException(status_code=400, detail="No valid POs found in the uploaded file")
+
+    if dry_run:
+        return JSONResponse(content={
+            "dry_run":  True,
+            "po_count": len(po_list),
+            "skipped":  skipped,
+            "payloads": po_list,
+        })
+
+    try:
+        results = create_purchase_orders(po_list, approve=approve)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    success = sum(1 for r in results if r["status"] == "SUCCESS")
+    failed  = sum(1 for r in results if r["status"] in ("FAILED", "ERROR"))
+
+    return StreamingResponse(
+        io.BytesIO(build_results_excel(results)),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": "attachment; filename=po_upload_results.xlsx",
+            "X-Total":   str(len(results)),
+            "X-Success": str(success),
+            "X-Failed":  str(failed),
+        },
+    )
+
+
+
+================================================
+FILE: app/services/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: app/services/auth.py
+================================================
+import os
+import requests
+from dotenv import load_dotenv, set_key
+
+load_dotenv()
+
+TENANT_URL    = os.getenv("UNIWARE_TENANT_URL")
+USERNAME      = os.getenv("UNIWARE_USERNAME")
+PASSWORD      = os.getenv("UNIWARE_PASSWORD")
+CLIENT_ID     = os.getenv("UNIWARE_CLIENT_ID", "my-trusted-client")
+FACILITY_CODE = os.getenv("UNIWARE_FACILITY_CODE", "")
+
+# In-memory token state
+_access_token  = os.getenv("UNIWARE_ACCESS_TOKEN", "")
+_refresh_token = os.getenv("UNIWARE_REFRESH_TOKEN", "")
+
+# Only persist to .env when running locally (file exists)
+_ENV_PATH = ".env"
+_HAS_ENV_FILE = os.path.isfile(_ENV_PATH)
+
+
+def _save_tokens(access: str, refresh: str) -> None:
+    global _access_token, _refresh_token
+    _access_token  = access
+    _refresh_token = refresh
+    if _HAS_ENV_FILE:
+        set_key(_ENV_PATH, "UNIWARE_ACCESS_TOKEN",  access)
+        set_key(_ENV_PATH, "UNIWARE_REFRESH_TOKEN", refresh)
+
+
+def fetch_token_with_password() -> str:
+    resp = requests.get(
+        f"{TENANT_URL}/oauth/token",
+        params={
+            "grant_type": "password",
+            "client_id":  CLIENT_ID,
+            "username":   USERNAME,
+            "password":   PASSWORD,
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    tokens = resp.json()
+    _save_tokens(tokens["access_token"], tokens["refresh_token"])
+    print("âœ“ Token fetched via username/password")
+    return tokens["access_token"]
+
+
+def refresh_access_token() -> str:
+    resp = requests.get(
+        f"{TENANT_URL}/oauth/token",
+        params={
+            "grant_type":    "refresh_token",
+            "client_id":     CLIENT_ID,
+            "refresh_token": _refresh_token,
+        },
+        timeout=30,
+    )
+    if resp.status_code == 400:
+        print("Refresh token expired â€” falling back to password login...")
+        return fetch_token_with_password()
+    resp.raise_for_status()
+    tokens = resp.json()
+    _save_tokens(tokens["access_token"], tokens.get("refresh_token", _refresh_token))
+    print("âœ“ Token refreshed")
+    return tokens["access_token"]
+
+
+def get_valid_token() -> str:
+    if _refresh_token:
+        return refresh_access_token()
+    return fetch_token_with_password()
+
+
+def get_headers() -> dict:
+    global _access_token
+    if not _access_token:
+        _access_token = get_valid_token()
+    headers = {
+        "Content-Type":  "application/json",
+        "Authorization": f"Bearer {_access_token}",
+    }
+    if FACILITY_CODE:
+        headers["Facility"] = FACILITY_CODE
+    return headers
+
+
+def api_post(url: str, payload: dict) -> dict:
+    global _access_token
+
+    resp = requests.post(url, json=payload, headers=get_headers(), timeout=60)
+
+    if resp.status_code == 401:
+        print("Token rejected â€” refreshing...")
+        _access_token = get_valid_token()
+        resp = requests.post(url, json=payload, headers=get_headers(), timeout=60)
+
+    # Surface readable error before raising
+    if not resp.ok:
+        raise Exception(f"HTTP {resp.status_code} from Unicommerce: {resp.text[:300]}")
+
+    return resp.json()
+
+
+
+================================================
+FILE: app/services/inventory.py
+================================================
+import io
+from typing import Optional
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
+
+from app.services.auth import api_post, TENANT_URL
+
+
+def fetch_inventory(
+    updated_since_minutes: Optional[int] = None,
+    sku_list: Optional[list[str]] = None,
+) -> list[dict]:
+    url     = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
+    payload = {}
+    if sku_list:
+        payload["itemTypeSKUs"] = sku_list
+    if updated_since_minutes:
+        payload["updatedSinceInMinutes"] = updated_since_minutes
+
+    data = api_post(url, payload)
+    if not data.get("successful"):
+        raise Exception(f"Unicommerce error: {data.get('message')} | {data.get('errors')}")
+
+    return data.get("inventorySnapShotList", [])
+
+
+def build_inventory_excel(records: list[dict]) -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Inventory Snapshot"
+
+    header_font  = Font(bold=True, color="FFFFFF", name="Arial")
+    header_fill  = PatternFill("solid", start_color="1F4E79")
+    center_align = Alignment(horizontal="center", vertical="center")
+
+    headers = [
+        "SKU Code", "Item Name", "Facility Code",
+        "Sellable Qty", "Blocked Qty", "Pending Putaway",
+        "Bad Inventory", "Virtual Inventory", "Updated At",
+    ]
+    for col, h in enumerate(headers, start=1):
+        cell           = ws.cell(row=1, column=col, value=h)
+        cell.font      = header_font
+        cell.fill      = header_fill
+        cell.alignment = center_align
+    ws.row_dimensions[1].height = 20
+
+    for row_idx, item in enumerate(records, start=2):
+        ws.cell(row=row_idx, column=1, value=item.get("itemTypeSKU"))
+        ws.cell(row=row_idx, column=2, value=item.get("itemName"))
+        ws.cell(row=row_idx, column=3, value=item.get("facilityCode"))
+        ws.cell(row=row_idx, column=4, value=item.get("inventory", 0))
+        ws.cell(row=row_idx, column=5, value=item.get("blockedInventory", 0))
+        ws.cell(row=row_idx, column=6, value=item.get("pendingPutawayInventory", 0))
+        ws.cell(row=row_idx, column=7, value=item.get("badInventory", 0))
+        ws.cell(row=row_idx, column=8, value=item.get("virtualInventory", 0))
+        ws.cell(row=row_idx, column=9, value=item.get("updatedAt"))
+
+    col_widths = [18, 30, 16, 14, 14, 16, 16, 18, 22]
+    for col, width in enumerate(col_widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
+
+    last = len(records) + 2
+    ws.cell(row=last, column=1, value="TOTAL").font = Font(bold=True, name="Arial")
+    ws.cell(row=last, column=4, value=f"=SUM(D2:D{last-1})")
+    ws.cell(row=last, column=5, value=f"=SUM(E2:E{last-1})")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+
+================================================
+FILE: app/services/po.py
+================================================
+import io
+from datetime import datetime
+from typing import Optional
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
+
+from app.services.auth import api_post, TENANT_URL
+
+
+# â”€â”€ EXCEL PARSING â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def parse_po_excel(file_bytes: bytes) -> tuple[list[dict], list[str]]:
+    """
+    Expects two sheets:
+      'PO Header' â€” one row per PO
+      'PO Items'  â€” one row per line item, linked by purchaseOrderCode
+    Returns (po_list, skipped_codes)
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+
+    header_ws   = wb["PO Header"]
+    header_cols = [cell.value for cell in header_ws[1]]
+
+    po_map: dict[str, dict] = {}
+    for row in header_ws.iter_rows(min_row=2, values_only=True):
+        if not row[0]:
+            continue
+        po      = dict(zip(header_cols, row))
+        po_code = str(po["purchaseOrderCode"]).strip()
+        po_map[po_code] = {
+            "purchaseOrderCode":             po_code,
+            "type":                          po.get("type", "Manual"),
+            "vendorCode":                    str(po.get("vendorCode", "")).strip(),
+            "vendorAgreementName":           str(po.get("vendorAgreementName", "")).strip() or None,
+            "currencyCode":                  str(po.get("currencyCode", "INR")).strip(),
+            "deliveryDate":                  _fmt_date(po.get("deliveryDate")),
+            "expiryDate":                    _fmt_date(po.get("expiryDate")),
+            "logisticCharges":               float(po.get("logisticCharges") or 0),
+            "logisticChargesDivisionMethod": str(po.get("logisticChargesDivisionMethod", "")).strip() or None,
+            "purchaseOrderItems":            [],
+        }
+
+    items_ws   = wb["PO Items"]
+    items_cols = [cell.value for cell in items_ws[1]]
+
+    skipped: list[str] = []
+    for row in items_ws.iter_rows(min_row=2, values_only=True):
+        if not row[0]:
+            continue
+        item    = dict(zip(items_cols, row))
+        po_code = str(item["purchaseOrderCode"]).strip()
+        if po_code not in po_map:
+            skipped.append(po_code)
+            continue
+        po_map[po_code]["purchaseOrderItems"].append({
+            "itemSKU":            str(item.get("itemSKU", "")).strip(),
+            "quantity":           int(item.get("quantity") or 0),
+            "unitPrice":          float(item.get("unitPrice") or 0),
+            "maxRetailPrice":     float(item.get("maxRetailPrice") or 0),
+            "discount":           float(item.get("discount") or 0),
+            "discountPercentage": float(item.get("discountPercentage") or 0),
+            "taxTypeCode":        str(item.get("taxTypeCode", "")).strip() or None,
+        })
+
+    return list(po_map.values()), skipped
+
+
+def _fmt_date(val) -> Optional[str]:
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return str(val).strip()
+
+
+# â”€â”€ API CALLS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def create_purchase_orders(po_list: list[dict], approve: bool = False) -> list[dict]:
+    endpoint = "createAndApprove" if approve else "create"
+    url      = f"{TENANT_URL}/services/rest/v1/purchase/purchaseOrder/{endpoint}"
+
+    results = []
+    for po in po_list:
+        po_code = po["purchaseOrderCode"]
+        if not po["purchaseOrderItems"]:
+            results.append({"poCode": po_code, "status": "SKIPPED", "message": "No items found"})
+            continue
+        try:
+            data = api_post(url, po)
+            if data.get("successful"):
+                results.append({"poCode": po_code, "status": "SUCCESS", "message": data.get("message", "")})
+            else:
+                errors = data.get("errors", [])
+                msg    = errors[0].get("message") if errors else data.get("message", "Unknown error")
+                results.append({"poCode": po_code, "status": "FAILED", "message": msg})
+        except Exception as e:
+            results.append({"poCode": po_code, "status": "ERROR", "message": str(e)})
+
+    return results
+
+
+# â”€â”€ RESULTS EXCEL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def build_results_excel(results: list[dict]) -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Upload Results"
+
+    header_font = Font(bold=True, color="FFFFFF", name="Arial")
+    header_fill = PatternFill("solid", start_color="1F4E79")
+
+    for col, h in enumerate(["PO Code", "Status", "Message"], start=1):
+        cell           = ws.cell(row=1, column=col, value=h)
+        cell.font      = header_font
+        cell.fill      = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    fill_map = {
+        "SUCCESS": PatternFill("solid", start_color="C6EFCE"),
+        "FAILED":  PatternFill("solid", start_color="FFC7CE"),
+        "ERROR":   PatternFill("solid", start_color="FFC7CE"),
+        "SKIPPED": PatternFill("solid", start_color="FFEB9C"),
+    }
+
+    for i, r in enumerate(results, start=2):
+        ws.cell(row=i, column=1, value=r["poCode"])
+        ws.cell(row=i, column=2, value=r["status"])
+        ws.cell(row=i, column=3, value=r["message"])
+        fill = fill_map.get(r["status"], fill_map["SKIPPED"])
+        for col in range(1, 4):
+            ws.cell(row=i, column=col).fill = fill
+
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 50
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+# â”€â”€ PO TEMPLATE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def build_po_template() -> bytes:
+    wb = openpyxl.Workbook()
+
+    header_font = Font(bold=True, color="FFFFFF", name="Arial")
+    header_fill = PatternFill("solid", start_color="1F4E79")
+    center      = Alignment(horizontal="center")
+
+    ws1       = wb.active
+    ws1.title = "PO Header"
+    po_cols   = [
+        "purchaseOrderCode", "type", "vendorCode", "vendorAgreementName",
+        "currencyCode", "deliveryDate", "expiryDate",
+        "logisticCharges", "logisticChargesDivisionMethod",
+    ]
+    for col, h in enumerate(po_cols, start=1):
+        cell           = ws1.cell(row=1, column=col, value=h)
+        cell.font      = header_font
+        cell.fill      = header_fill
+        cell.alignment = center
+        ws1.column_dimensions[cell.column_letter].width = 26
+    ws1.append(["PO-2024-001", "Manual", "VENDOR001", "", "INR", "2024-12-31", "2024-12-31", 0, ""])
+
+    ws2       = wb.create_sheet("PO Items")
+    item_cols = [
+        "purchaseOrderCode", "itemSKU", "quantity", "unitPrice",
+        "maxRetailPrice", "discount", "discountPercentage", "taxTypeCode",
+    ]
+    for col, h in enumerate(item_cols, start=1):
+        cell           = ws2.cell(row=1, column=col, value=h)
+        cell.font      = header_font
+        cell.fill      = header_fill
+        cell.alignment = center
+        ws2.column_dimensions[cell.column_letter].width = 22
+    ws2.append(["PO-2024-001", "SKU001", 10, 500.00, 999.00, 0, 0, "GST18"])
+    ws2.append(["PO-2024-001", "SKU002",  5, 300.00, 599.00, 0, 0, "GST12"])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+

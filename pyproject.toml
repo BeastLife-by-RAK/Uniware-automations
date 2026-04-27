@@ -1,0 +1,13 @@
+[project]
+name = "uniwareautomations"
+version = "1.0.0"
+description = "FastAPI wrapper for Unicommerce/Uniware APIs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "requests>=2.33.0",
+    "openpyxl>=3.1.5",
+    "python-dotenv>=1.2.0",
+]
