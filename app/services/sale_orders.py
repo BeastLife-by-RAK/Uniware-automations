@@ -21,7 +21,7 @@ SCOPES = [
 # ── FACILITY MAPPING ──────────────────────────────────────────────────────────
 WAREHOUSE_TO_FACILITY = {
     "Gurgaon":   "Emiza_B2C_GGN",
-    "Gurgoan":   "Emiza_B2C_GGN",   # handle typo in sheet
+    "Gurgoan":   "Emiza_B2C_GGN",
     "Bangalore": "Emiza_B2C_BLR",
     "Mumbai":    "Emiza_B2C_Mumbai",
     "Kolkata":   "Emiza_B2C_WB",
@@ -37,8 +37,6 @@ def _get_sheet():
 
 
 def _build_order_payload(row: dict, row_number: int) -> dict:
-    """Build Unicommerce sale order payload from a sheet row."""
-
     order_id     = str(row.get("Order ID", "")).strip()
     facility_raw = str(row.get("Near Warehouse", "")).strip()
     facility     = WAREHOUSE_TO_FACILITY.get(facility_raw, "Emiza_B2C_GGN")
@@ -53,25 +51,24 @@ def _build_order_payload(row: dict, row_number: int) -> dict:
     sku          = str(row.get("*Master SKU", "")).strip()
     quantity     = int(row.get("*Product Quantity") or 1)
     order_date   = str(row.get("Order Place Date", datetime.now().isoformat())).strip()
-
     address_id   = "SHIP_ADDR_1"
 
     return {
         "saleOrder": {
-            "code":                        order_id,
-            "displayOrderCode":            order_id,
-            "displayOrderDateTime":        order_date,
-            "customerName":                customer,
-            "notificationMobile":          mobile,
-            "channel":                     "INFLUENCER",
-            "cashOnDelivery":              False,
-            "currencyCode":                "INR",
-            "totalPrepaidAmount":          0,
-            "totalCashOnDeliveryCharges":  0,
-            "totalDiscount":               0,
-            "totalShippingCharges":        0,
-            "totalGiftWrapCharges":        0,
-            "totalStoreCredit":            0,
+            "code":                       order_id,
+            "displayOrderCode":           order_id,
+            "displayOrderDateTime":       order_date,
+            "customerName":               customer,
+            "notificationMobile":         mobile,
+            "channel":                    "INFLUENCER",
+            "cashOnDelivery":             False,
+            "currencyCode":               "INR",
+            "totalPrepaidAmount":         0,
+            "totalCashOnDeliveryCharges": 0,
+            "totalDiscount":              0,
+            "totalShippingCharges":       0,
+            "totalGiftWrapCharges":       0,
+            "totalStoreCredit":           0,
             "addresses": [
                 {
                     "id":           address_id,
@@ -107,17 +104,56 @@ def _build_order_payload(row: dict, row_number: int) -> dict:
     }
 
 
+def _find_or_create_status_col(ws, all_values: list) -> int:
+    """
+    Find existing Order Status column or use Remarks column as fallback.
+    Never tries to add beyond sheet column limits.
+    """
+    raw_headers = all_values[0] if all_values else []
+
+    # Already exists
+    if "Order Status" in raw_headers:
+        return raw_headers.index("Order Status") + 1
+
+    # Try to add within sheet limits
+    sheet_props  = ws.spreadsheet.fetch_sheet_metadata()
+    sheets       = sheet_props.get("sheets", [])
+    max_cols     = 26  # default fallback
+    for s in sheets:
+        props = s.get("properties", {})
+        if props.get("title") == ws.title:
+            max_cols = props.get("gridProperties", {}).get("columnCount", 26)
+            break
+
+    next_col = len(raw_headers) + 1
+    if next_col <= max_cols:
+        ws.update_cell(1, next_col, "Order Status")
+        return next_col
+
+    # Sheet is full — expand it first
+    ws.spreadsheet.batch_update({
+        "requests": [{
+            "appendDimension": {
+                "sheetId":    ws.id,
+                "dimension":  "COLUMNS",
+                "length":     1
+            }
+        }]
+    })
+    ws.update_cell(1, next_col, "Order Status")
+    return next_col
+
+
 def process_sale_orders() -> dict:
-    ws      = _get_sheet()
-    
-    # Handle duplicate headers manually
+    ws         = _get_sheet()
     all_values = ws.get_all_values()
-    if not all_values:
+
+    if not all_values or len(all_values) < 2:
         return {"success": 0, "failed": 0, "skipped": 0, "errors": []}
 
     raw_headers = all_values[0]
-    
-    # Rename duplicate headers by appending index
+
+    # Handle duplicate headers by appending index
     seen    = {}
     headers = []
     for h in raw_headers:
@@ -131,16 +167,11 @@ def process_sale_orders() -> dict:
     # Build records manually
     records = []
     for row_values in all_values[1:]:
-        # Pad row if shorter than headers
         padded = row_values + [""] * (len(headers) - len(row_values))
         records.append(dict(zip(headers, padded)))
 
-    # Find or create Status column
-    if "Order Status" not in raw_headers:
-        ws.update_cell(1, len(raw_headers) + 1, "Order Status")
-        status_col = len(raw_headers) + 1
-    else:
-        status_col = raw_headers.index("Order Status") + 1
+    # Find or create status column
+    status_col = _find_or_create_status_col(ws, all_values)
 
     url     = f"{TENANT_URL}/services/rest/v1/oms/saleOrder/create"
     results = {"success": 0, "failed": 0, "skipped": 0, "errors": []}
@@ -150,9 +181,11 @@ def process_sale_orders() -> dict:
         order_id     = str(row.get("Order ID", "")).strip()
         facility_raw = str(row.get("Near Warehouse", "")).strip()
         sku          = str(row.get("*Master SKU", "")).strip()
-        status       = str(row.get("Order Status", "")).strip()
 
-        if status in ("SUCCESS", "FAILED"):
+        # Check status from sheet directly to avoid duplicate header confusion
+        current_status = str(ws.cell(row_number, status_col).value or "").strip()
+
+        if current_status in ("SUCCESS", "FAILED"):
             results["skipped"] += 1
             continue
 
