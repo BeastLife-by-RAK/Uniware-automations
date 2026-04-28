@@ -108,38 +108,54 @@ def _build_order_payload(row: dict, row_number: int) -> dict:
 
 
 def process_sale_orders() -> dict:
-    """
-    Read unprocessed rows from Google Sheet, create sale orders in Unicommerce,
-    write results back to sheet.
-    Returns summary of processed orders.
-    """
     ws      = _get_sheet()
-    records = ws.get_all_records()
-    headers = ws.row_values(1)
+    
+    # Handle duplicate headers manually
+    all_values = ws.get_all_values()
+    if not all_values:
+        return {"success": 0, "failed": 0, "skipped": 0, "errors": []}
+
+    raw_headers = all_values[0]
+    
+    # Rename duplicate headers by appending index
+    seen    = {}
+    headers = []
+    for h in raw_headers:
+        if h in seen:
+            seen[h] += 1
+            headers.append(f"{h}_{seen[h]}")
+        else:
+            seen[h] = 0
+            headers.append(h)
+
+    # Build records manually
+    records = []
+    for row_values in all_values[1:]:
+        # Pad row if shorter than headers
+        padded = row_values + [""] * (len(headers) - len(row_values))
+        records.append(dict(zip(headers, padded)))
 
     # Find or create Status column
-    if "Order Status" not in headers:
-        ws.update_cell(1, len(headers) + 1, "Order Status")
-        status_col = len(headers) + 1
+    if "Order Status" not in raw_headers:
+        ws.update_cell(1, len(raw_headers) + 1, "Order Status")
+        status_col = len(raw_headers) + 1
     else:
-        status_col = headers.index("Order Status") + 1
+        status_col = raw_headers.index("Order Status") + 1
 
     url     = f"{TENANT_URL}/services/rest/v1/oms/saleOrder/create"
     results = {"success": 0, "failed": 0, "skipped": 0, "errors": []}
 
     for i, row in enumerate(records):
-        row_number  = i + 2  # account for header row
-        order_id    = str(row.get("Order ID", "")).strip()
+        row_number   = i + 2
+        order_id     = str(row.get("Order ID", "")).strip()
         facility_raw = str(row.get("Near Warehouse", "")).strip()
-        sku         = str(row.get("*Master SKU", "")).strip()
-        status      = str(row.get("Order Status", "")).strip()
+        sku          = str(row.get("*Master SKU", "")).strip()
+        status       = str(row.get("Order Status", "")).strip()
 
-        # Skip already processed rows
         if status in ("SUCCESS", "FAILED"):
             results["skipped"] += 1
             continue
 
-        # Skip rows with missing critical data
         if not order_id or not sku or not facility_raw:
             ws.update_cell(row_number, status_col, "SKIPPED - missing data")
             results["skipped"] += 1
@@ -161,8 +177,8 @@ def process_sale_orders() -> dict:
                 results["success"] += 1
                 print(f"  ✓ Row {row_number} Order {order_id} → {uc_code}")
             else:
-                errors  = data.get("errors", [])
-                msg     = errors[0].get("description") if errors else data.get("message", "Unknown error")
+                errors = data.get("errors", [])
+                msg    = errors[0].get("description") if errors else data.get("message", "Unknown error")
                 ws.update_cell(row_number, status_col, f"FAILED - {msg}")
                 results["failed"] += 1
                 results["errors"].append({"order_id": order_id, "error": msg})
