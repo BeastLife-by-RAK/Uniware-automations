@@ -4,6 +4,7 @@ from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from app.services.inventory import fetch_inventory, build_inventory_excel, fetch_facilities
+from app.services.sheets import push_inventory_to_sheets
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
 
@@ -56,3 +57,35 @@ def get_inventory(
         )
 
     return JSONResponse(content={"count": len(records), "records": records})
+
+
+@router.post("/push-to-sheets")
+def push_to_sheets(
+    updated_since_minutes: Optional[int] = Query(
+        1440,
+        description="Only SKUs updated in last N minutes. Default 1440 (24h)."
+    ),
+):
+    """
+    Fetch inventory from Unicommerce and push directly to Google Sheets.
+    Creates a new dated tab per facility e.g. GGN-2026-04-27.
+    Designed to be triggered by Cloud Scheduler.
+    """
+    try:
+        records = fetch_inventory(updated_since_minutes=updated_since_minutes)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Unicommerce fetch failed: {e}")
+
+    if not records:
+        return JSONResponse(content={"message": "No records returned", "tabs_created": {}})
+
+    try:
+        summary = push_inventory_to_sheets(records)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Google Sheets write failed: {e}")
+
+    return JSONResponse(content={
+        "message": "Successfully pushed to Google Sheets",
+        "tabs_created": summary,
+        "total_records": len(records),
+    })
