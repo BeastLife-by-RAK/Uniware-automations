@@ -60,7 +60,7 @@ def _build_order_payload(row: dict, row_number: int) -> dict:
             "displayOrderDateTime":       order_date,
             "customerName":               customer,
             "notificationMobile":         mobile,
-            "channel":                    "INFLUENCER",
+            "channel":                    "WEBSITE",
             "cashOnDelivery":             False,
             "currencyCode":               "INR",
             "totalPrepaidAmount":         0,
