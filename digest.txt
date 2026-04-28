@@ -1,6 +1,7 @@
 Directory structure:
 └── UniwareAutomations/
     ├── README.md
+    ├── debug.py
     ├── Dockerfile
     ├── pyproject.toml
     ├── .dockerignore
@@ -10,12 +11,15 @@ Directory structure:
         ├── routers/
         │   ├── __init__.py
         │   ├── inventory.py
-        │   └── po.py
+        │   ├── po.py
+        │   └── sale_orders.py
         └── services/
             ├── __init__.py
             ├── auth.py
             ├── inventory.py
-            └── po.py
+            ├── po.py
+            ├── sale_orders.py
+            └── sheets.py
 
 ================================================
 FILE: README.md
@@ -95,6 +99,49 @@ gcloud run deploy uniware-api \
 
 
 ================================================
+FILE: debug.py
+================================================
+import requests
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+TENANT_URL = os.getenv("UNIWARE_TENANT_URL")
+USERNAME   = os.getenv("UNIWARE_USERNAME")
+PASSWORD   = os.getenv("UNIWARE_PASSWORD")
+CLIENT_ID  = os.getenv("UNIWARE_CLIENT_ID", "my-trusted-client")
+
+# Step 1: Get token
+print("--- Fetching token ---")
+token_url = f"{TENANT_URL}/oauth/token"
+params = {
+    "grant_type": "password",
+    "client_id":  CLIENT_ID,
+    "username":   USERNAME,
+    "password":   PASSWORD,
+}
+r = requests.get(token_url, params=params, timeout=30)
+print(f"Status: {r.status_code}")
+print(f"Response: {r.text}")
+
+# Step 2: Hit inventory with whatever token we got
+if r.status_code == 200:
+    token = r.json().get("access_token")
+    print(f"\nToken: {token}")
+
+    print("\n--- Hitting inventory endpoint ---")
+    inv_url = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
+    headers = {
+        "Content-Type":  "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+    r2 = requests.post(inv_url, json={}, headers=headers, timeout=60)
+    print(f"Status: {r2.status_code}")
+    print(f"Response: {r2.text[:500]}")
+
+
+================================================
 FILE: Dockerfile
 ================================================
 FROM python:3.12-slim
@@ -102,14 +149,14 @@ FROM python:3.12-slim
 WORKDIR /app
 
 COPY pyproject.toml .
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" requests openpyxl python-dotenv
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" requests openpyxl \
+    python-dotenv python-multipart gspread google-auth
 
 COPY app/ ./app/
 
 EXPOSE 8080
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
-
 
 
 ================================================
@@ -127,8 +174,10 @@ dependencies = [
     "requests>=2.33.0",
     "openpyxl>=3.1.5",
     "python-dotenv>=1.2.0",
+    "python-multipart>=0.0.9",
+    "gspread>=6.0.0",
+    "google-auth>=2.0.0",
 ]
-
 
 
 ================================================
@@ -156,22 +205,22 @@ FILE: app/main.py
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from app.routers import inventory, po
+from app.routers import inventory, po, sale_orders
 
 app = FastAPI(
     title="Uniware Automations API",
-    description="REST API wrapper for Unicommerce/Uniware â€” inventory fetch and purchase order upload.",
+    description="REST API wrapper for Unicommerce/Uniware â€” inventory fetch, PO upload and sale order creation.",
     version="1.0.0",
 )
 
 app.include_router(inventory.router)
 app.include_router(po.router)
+app.include_router(sale_orders.router)
 
 
 @app.get("/health", tags=["Health"])
 def health():
     return JSONResponse(content={"status": "ok"})
-
 
 
 ================================================
@@ -188,29 +237,49 @@ from typing import Optional
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from app.services.inventory import fetch_inventory, build_inventory_excel
+from app.services.inventory import fetch_inventory, build_inventory_excel, fetch_facilities
+from app.services.sheets import push_inventory_to_sheets
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
+
+
+@router.get("/facilities")
+def list_facilities():
+    """List all facility codes."""
+    try:
+        codes = fetch_facilities()
+        return JSONResponse(content={"count": len(codes), "facilities": codes})
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/fetch")
 def get_inventory(
     format: str = Query("json", description="Response format: json or excel"),
-    updated_since_minutes: Optional[int] = Query(None, description="Only SKUs updated in last N minutes (max 1440)"),
-    skus: Optional[str] = Query(None, description="Comma-separated SKU codes e.g. SKU001,SKU002"),
+    updated_since_minutes: Optional[int] = Query(
+        1440,
+        description="Only SKUs updated in last N minutes. Default 1440 (24h). Max 1440."
+    ),
+    skus: Optional[str] = Query(
+        None,
+        description="Comma-separated SKU codes e.g. SKU001,SKU002"
+    ),
 ):
     """
-    Fetch inventory snapshot from Unicommerce.
+    Fetch inventory snapshot from Unicommerce across all facilities.
 
-    - **format=json** â†’ raw JSON (default, good for Google Sheets)
+    - **format=json** â†’ raw JSON (default)
     - **format=excel** â†’ downloadable .xlsx file
-    - **updated_since_minutes** â†’ only recently changed SKUs
+    - **updated_since_minutes** â†’ SKUs updated in last N minutes (default 1440 = 24h)
     - **skus** â†’ filter to specific SKUs
     """
     sku_list = [s.strip() for s in skus.split(",")] if skus else None
 
     try:
-        records = fetch_inventory(updated_since_minutes=updated_since_minutes, sku_list=sku_list)
+        records = fetch_inventory(
+            updated_since_minutes=updated_since_minutes,
+            sku_list=sku_list,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -223,6 +292,37 @@ def get_inventory(
 
     return JSONResponse(content={"count": len(records), "records": records})
 
+
+@router.post("/push-to-sheets")
+def push_to_sheets(
+    updated_since_minutes: Optional[int] = Query(
+        1440,
+        description="Only SKUs updated in last N minutes. Default 1440 (24h)."
+    ),
+):
+    """
+    Fetch inventory from Unicommerce and push directly to Google Sheets.
+    Creates a new dated tab per facility e.g. GGN-2026-04-27.
+    Designed to be triggered by Cloud Scheduler.
+    """
+    try:
+        records = fetch_inventory(updated_since_minutes=updated_since_minutes)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Unicommerce fetch failed: {e}")
+
+    if not records:
+        return JSONResponse(content={"message": "No records returned", "tabs_created": {}})
+
+    try:
+        summary = push_inventory_to_sheets(records)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Google Sheets write failed: {e}")
+
+    return JSONResponse(content={
+        "message": "Successfully pushed to Google Sheets",
+        "tabs_created": summary,
+        "total_records": len(records),
+    })
 
 
 ================================================
@@ -304,6 +404,38 @@ async def upload_purchase_orders(
 
 
 ================================================
+FILE: app/routers/sale_orders.py
+================================================
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
+
+from app.services.sale_orders import process_sale_orders
+
+router = APIRouter(prefix="/orders", tags=["Sale Orders"])
+
+
+@router.post("/process-influencer")
+def process_influencer_orders():
+    """
+    Read influencer sale orders from Google Sheet and create them in Unicommerce.
+    Skips rows already marked SUCCESS or FAILED.
+    Writes Order Status back to the sheet.
+    """
+    try:
+        results = process_sale_orders()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return JSONResponse(content={
+        "message":  "Influencer orders processed",
+        "success":  results["success"],
+        "failed":   results["failed"],
+        "skipped":  results["skipped"],
+        "errors":   results["errors"],
+    })
+
+
+================================================
 FILE: app/services/__init__.py
 ================================================
 [Empty file]
@@ -324,12 +456,10 @@ PASSWORD      = os.getenv("UNIWARE_PASSWORD")
 CLIENT_ID     = os.getenv("UNIWARE_CLIENT_ID", "my-trusted-client")
 FACILITY_CODE = os.getenv("UNIWARE_FACILITY_CODE", "")
 
-# In-memory token state
 _access_token  = os.getenv("UNIWARE_ACCESS_TOKEN", "")
 _refresh_token = os.getenv("UNIWARE_REFRESH_TOKEN", "")
 
-# Only persist to .env when running locally (file exists)
-_ENV_PATH = ".env"
+_ENV_PATH     = ".env"
 _HAS_ENV_FILE = os.path.isfile(_ENV_PATH)
 
 
@@ -386,7 +516,7 @@ def get_valid_token() -> str:
     return fetch_token_with_password()
 
 
-def get_headers() -> dict:
+def _build_headers(facility: str = None) -> dict:
     global _access_token
     if not _access_token:
         _access_token = get_valid_token()
@@ -394,27 +524,43 @@ def get_headers() -> dict:
         "Content-Type":  "application/json",
         "Authorization": f"Bearer {_access_token}",
     }
-    if FACILITY_CODE:
+    if facility:
+        headers["Facility"] = facility
+    elif FACILITY_CODE:
         headers["Facility"] = FACILITY_CODE
     return headers
 
 
-def api_post(url: str, payload: dict) -> dict:
+def api_post(url: str, payload: dict, facility: str = None) -> dict:
     global _access_token
 
-    resp = requests.post(url, json=payload, headers=get_headers(), timeout=60)
+    resp = requests.post(url, json=payload, headers=_build_headers(facility), timeout=60)
 
     if resp.status_code == 401:
         print("Token rejected â€” refreshing...")
         _access_token = get_valid_token()
-        resp = requests.post(url, json=payload, headers=get_headers(), timeout=60)
+        resp = requests.post(url, json=payload, headers=_build_headers(facility), timeout=60)
 
-    # Surface readable error before raising
     if not resp.ok:
         raise Exception(f"HTTP {resp.status_code} from Unicommerce: {resp.text[:300]}")
 
     return resp.json()
 
+
+def api_get(url: str, params: dict = None, facility: str = None) -> dict:
+    global _access_token
+
+    resp = requests.get(url, params=params, headers=_build_headers(facility), timeout=60)
+
+    if resp.status_code == 401:
+        print("Token rejected â€” refreshing...")
+        _access_token = get_valid_token()
+        resp = requests.get(url, params=params, headers=_build_headers(facility), timeout=60)
+
+    if not resp.ok:
+        raise Exception(f"HTTP {resp.status_code} from Unicommerce: {resp.text[:300]}")
+
+    return resp.json()
 
 
 ================================================
@@ -425,25 +571,67 @@ from typing import Optional
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
-from app.services.auth import api_post, TENANT_URL
+from app.services.auth import api_post, api_get, TENANT_URL, FACILITY_CODE
+
+
+FACILITY_MAP = {
+    "Emiza_B2C_BLR":    "Bangalore",
+    "Emiza_B2C_GGN":    "Gurugram",
+    "Emiza_B2C_Mumbai": "Mumbai",
+    "Emiza_B2C_WB":     "West Bengal",
+}
+
+
+def fetch_facilities() -> list[str]:
+    return list(FACILITY_MAP.keys())
 
 
 def fetch_inventory(
     updated_since_minutes: Optional[int] = None,
     sku_list: Optional[list[str]] = None,
 ) -> list[dict]:
-    url     = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
-    payload = {}
-    if sku_list:
-        payload["itemTypeSKUs"] = sku_list
-    if updated_since_minutes:
-        payload["updatedSinceInMinutes"] = updated_since_minutes
+    url            = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
+    facility_codes = fetch_facilities()
 
-    data = api_post(url, payload)
-    if not data.get("successful"):
-        raise Exception(f"Unicommerce error: {data.get('message')} | {data.get('errors')}")
+    if not updated_since_minutes and not sku_list:
+        updated_since_minutes = 1440
 
-    return data.get("inventorySnapShotList", [])
+    all_records = []
+    seen_keys   = set()
+
+    for code in facility_codes:
+        payload = {}
+        if sku_list:
+            payload["itemTypeSKUs"] = sku_list
+        if updated_since_minutes:
+            payload["updatedSinceInMinutes"] = updated_since_minutes
+
+        try:
+            data = api_post(url, payload, facility=code)
+
+            if data.get("successful"):
+                records = (
+                    data.get("inventorySnapshots")
+                    or data.get("inventorySnapShotList")
+                    or []
+                )
+                for r in records:
+                    key = f"{r.get('itemTypeSKU')}_{code}"
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        r["facilityCode"]     = code
+                        r["facilityLocation"] = FACILITY_MAP.get(code, code)
+                        all_records.append(r)
+                print(f"  âœ“ Facility {code} ({FACILITY_MAP.get(code)}): {len(records)} SKUs")
+            else:
+                print(f"  âš  Facility {code}: {data.get('message')} | errors: {data.get('errors')}")
+
+        except Exception as e:
+            print(f"  âš  Facility {code} failed: {e}")
+            continue
+
+    print(f"Total records across all facilities: {len(all_records)}")
+    return all_records
 
 
 def build_inventory_excel(records: list[dict]) -> bytes:
@@ -456,42 +644,79 @@ def build_inventory_excel(records: list[dict]) -> bytes:
     center_align = Alignment(horizontal="center", vertical="center")
 
     headers = [
-        "SKU Code", "Item Name", "Facility Code",
-        "Sellable Qty", "Blocked Qty", "Pending Putaway",
-        "Bad Inventory", "Virtual Inventory", "Updated At",
+        "SKU Code",
+        "Facility Code",
+        "Location",
+        "Sellable Qty",
+        "Open Sale",
+        "Open Purchase",
+        "Putaway Pending",
+        "Blocked Qty",
+        "Pending Stock Transfer",
+        "Vendor Inventory",
+        "Virtual Inventory",
+        "Pending Assessment",
+        "Bad Inventory",
+        "Inventory Not Synced",
+        "Batch Recall Qty",
     ]
+
     for col, h in enumerate(headers, start=1):
         cell           = ws.cell(row=1, column=col, value=h)
         cell.font      = header_font
         cell.fill      = header_fill
         cell.alignment = center_align
-    ws.row_dimensions[1].height = 20
+    ws.row_dimensions[1].height = 22
 
     for row_idx, item in enumerate(records, start=2):
-        ws.cell(row=row_idx, column=1, value=item.get("itemTypeSKU"))
-        ws.cell(row=row_idx, column=2, value=item.get("itemName"))
-        ws.cell(row=row_idx, column=3, value=item.get("facilityCode"))
-        ws.cell(row=row_idx, column=4, value=item.get("inventory", 0))
-        ws.cell(row=row_idx, column=5, value=item.get("blockedInventory", 0))
-        ws.cell(row=row_idx, column=6, value=item.get("pendingPutawayInventory", 0))
-        ws.cell(row=row_idx, column=7, value=item.get("badInventory", 0))
-        ws.cell(row=row_idx, column=8, value=item.get("virtualInventory", 0))
-        ws.cell(row=row_idx, column=9, value=item.get("updatedAt"))
+        ws.cell(row=row_idx, column=1,  value=item.get("itemTypeSKU"))
+        ws.cell(row=row_idx, column=2,  value=item.get("facilityCode"))
+        ws.cell(row=row_idx, column=3,  value=item.get("facilityLocation"))
+        ws.cell(row=row_idx, column=4,  value=item.get("inventory", 0))
+        ws.cell(row=row_idx, column=5,  value=item.get("openSale", 0))
+        ws.cell(row=row_idx, column=6,  value=item.get("openPurchase", 0))
+        ws.cell(row=row_idx, column=7,  value=item.get("putawayPending", 0))
+        ws.cell(row=row_idx, column=8,  value=item.get("inventoryBlocked", 0))
+        ws.cell(row=row_idx, column=9,  value=item.get("pendingStockTransfer", 0))
+        ws.cell(row=row_idx, column=10, value=item.get("vendorInventory", 0))
+        ws.cell(row=row_idx, column=11, value=item.get("virtualInventory", 0))
+        ws.cell(row=row_idx, column=12, value=item.get("pendingInventoryAssessment", 0))
+        ws.cell(row=row_idx, column=13, value=item.get("badInventory", 0))
+        ws.cell(row=row_idx, column=14, value=item.get("inventoryNotSynced", 0))
+        ws.cell(row=row_idx, column=15, value=item.get("batchRecallQuantity", 0))
 
-    col_widths = [18, 30, 16, 14, 14, 16, 16, 18, 22]
+        fill_color = "EBF3FB" if row_idx % 2 == 0 else "FFFFFF"
+        row_fill   = PatternFill("solid", start_color=fill_color)
+        for col in range(1, 16):
+            ws.cell(row=row_idx, column=col).fill = row_fill
+
+    col_widths = [16, 18, 14, 12, 10, 14, 14, 12, 22, 16, 16, 18, 14, 18, 16]
     for col, width in enumerate(col_widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
 
     last = len(records) + 2
-    ws.cell(row=last, column=1, value="TOTAL").font = Font(bold=True, name="Arial")
-    ws.cell(row=last, column=4, value=f"=SUM(D2:D{last-1})")
-    ws.cell(row=last, column=5, value=f"=SUM(E2:E{last-1})")
+    total_fill = PatternFill("solid", start_color="D6E4F0")
+    total_font = Font(bold=True, name="Arial")
+    ws.cell(row=last, column=1, value="TOTAL").font = total_font
+
+    numeric_cols = {
+        4: "D", 5: "E", 6: "F", 7: "G", 8: "H",
+        9: "I", 10: "J", 11: "K", 12: "L", 13: "M",
+        14: "N", 15: "O"
+    }
+    for col_num, col_letter in numeric_cols.items():
+        ws.cell(row=last, column=col_num, value=f"=SUM({col_letter}2:{col_letter}{last-1})")
+        ws.cell(row=last, column=col_num).font = total_font
+
+    for col in range(1, 16):
+        ws.cell(row=last, column=col).fill = total_fill
+
+    ws.freeze_panes = "A2"
 
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf.read()
-
 
 
 ================================================
@@ -682,4 +907,369 @@ def build_po_template() -> bytes:
     buf.seek(0)
     return buf.read()
 
+
+
+================================================
+FILE: app/services/sale_orders.py
+================================================
+import os
+import json
+from datetime import datetime
+from typing import Optional
+
+import gspread
+from google.oauth2.service_account import Credentials
+
+from app.services.auth import api_post, TENANT_URL
+
+# â”€â”€ SHEET CONFIG â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+SPREADSHEET_ID   = os.getenv("INFLUENCER_SHEET_ID")
+SHEET_TAB        = os.getenv("INFLUENCER_SHEET_TAB", "Sheet1")
+CREDENTIALS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+# â”€â”€ FACILITY MAPPING â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+WAREHOUSE_TO_FACILITY = {
+    "Gurgaon":   "Emiza_B2C_GGN",
+    "Gurgoan":   "Emiza_B2C_GGN",
+    "Bangalore": "Emiza_B2C_BLR",
+    "Mumbai":    "Emiza_B2C_Mumbai",
+    "Kolkata":   "Emiza_B2C_WB",
+}
+
+
+def _get_sheet():
+    creds_dict = json.loads(CREDENTIALS_JSON)
+    creds      = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    client     = gspread.authorize(creds)
+    sheet      = client.open_by_key(SPREADSHEET_ID)
+    return sheet.worksheet(SHEET_TAB)
+
+
+def _build_order_payload(row: dict, row_number: int) -> dict:
+    order_id     = str(row.get("Order ID", "")).strip()
+    facility_raw = str(row.get("Near Warehouse", "")).strip()
+    facility     = WAREHOUSE_TO_FACILITY.get(facility_raw, "Emiza_B2C_GGN")
+    mobile       = str(row.get("*CustomerMobile", "")).strip()
+    first_name   = str(row.get("*Customer First Name", "")).strip()
+    last_name    = str(row.get("Customer Last Name", "")).strip()
+    customer     = f"{first_name} {last_name}".strip()
+    address1     = str(row.get("*Shipping Address Line 1", "")).strip()
+    city         = str(row.get("*Shipping Address City", "")).strip()
+    state        = str(row.get("*Shipping Address State", "")).strip()
+    pincode      = str(row.get("*Shipping Address Postcode", "")).strip()
+    sku          = str(row.get("*Master SKU", "")).strip()
+    quantity     = int(row.get("*Product Quantity") or 1)
+    order_date   = str(row.get("Order Place Date", datetime.now().isoformat())).strip()
+    address_id   = "SHIP_ADDR_1"
+
+    return {
+        "saleOrder": {
+            "code":                       order_id,
+            "displayOrderCode":           order_id,
+            "displayOrderDateTime":       order_date,
+            "customerName":               customer,
+            "notificationMobile":         mobile,
+            "channel":                    "CUSTOM",
+            "cashOnDelivery":             False,
+            "currencyCode":               "INR",
+            "totalPrepaidAmount":         0,
+            "totalCashOnDeliveryCharges": 0,
+            "totalDiscount":              0,
+            "totalShippingCharges":       0,
+            "totalGiftWrapCharges":       0,
+            "totalStoreCredit":           0,
+            "addresses": [
+                {
+                    "id":           address_id,
+                    "name":         customer,
+                    "addressLine1": address1,
+                    "city":         city,
+                    "state":        state,
+                    "country":      "India",
+                    "pincode":      pincode,
+                    "phone":        mobile,
+                }
+            ],
+            "shippingAddress": {"referenceId": address_id},
+            "billingAddress":  {"referenceId": address_id},
+            "saleOrderItems": [
+                {
+                    "code":               f"{order_id}-1",
+                    "itemSku":            sku,
+                    "shippingMethodCode": "STD",
+                    "facilityCode":       "",
+                    "packetNumber":       1,
+                    "giftWrap":           False,
+                    "totalPrice":         0,
+                    "sellingPrice":       0,
+                    "prepaidAmount":      0,
+                    "discount":           0,
+                    "shippingCharges":    0,
+                    "storeCredit":        0,
+                    "giftWrapCharges":    0,
+                }
+            ],
+        }
+    }
+
+
+def _find_or_create_status_col(ws, all_values: list) -> int:
+    """
+    Find existing Order Status column or use Remarks column as fallback.
+    Never tries to add beyond sheet column limits.
+    """
+    raw_headers = all_values[0] if all_values else []
+
+    # Already exists
+    if "Order Status" in raw_headers:
+        return raw_headers.index("Order Status") + 1
+
+    # Try to add within sheet limits
+    sheet_props  = ws.spreadsheet.fetch_sheet_metadata()
+    sheets       = sheet_props.get("sheets", [])
+    max_cols     = 26  # default fallback
+    for s in sheets:
+        props = s.get("properties", {})
+        if props.get("title") == ws.title:
+            max_cols = props.get("gridProperties", {}).get("columnCount", 26)
+            break
+
+    next_col = len(raw_headers) + 1
+    if next_col <= max_cols:
+        ws.update_cell(1, next_col, "Order Status")
+        return next_col
+
+    # Sheet is full â€” expand it first
+    ws.spreadsheet.batch_update({
+        "requests": [{
+            "appendDimension": {
+                "sheetId":    ws.id,
+                "dimension":  "COLUMNS",
+                "length":     1
+            }
+        }]
+    })
+    ws.update_cell(1, next_col, "Order Status")
+    return next_col
+
+
+def process_sale_orders() -> dict:
+    ws         = _get_sheet()
+    all_values = ws.get_all_values()
+
+    if not all_values or len(all_values) < 2:
+        return {"success": 0, "failed": 0, "skipped": 0, "errors": []}
+
+    raw_headers = all_values[0]
+
+    # Handle duplicate headers by appending index
+    seen    = {}
+    headers = []
+    for h in raw_headers:
+        if h in seen:
+            seen[h] += 1
+            headers.append(f"{h}_{seen[h]}")
+        else:
+            seen[h] = 0
+            headers.append(h)
+
+    # Build records manually
+    records = []
+    for row_values in all_values[1:]:
+        padded = row_values + [""] * (len(headers) - len(row_values))
+        records.append(dict(zip(headers, padded)))
+
+    # Find or create status column
+    status_col = _find_or_create_status_col(ws, all_values)
+
+    url     = f"{TENANT_URL}/services/rest/v1/oms/saleOrder/create"
+    results = {"success": 0, "failed": 0, "skipped": 0, "errors": []}
+
+    for i, row in enumerate(records):
+        row_number   = i + 2
+        order_id     = str(row.get("Order ID", "")).strip()
+        facility_raw = str(row.get("Near Warehouse", "")).strip()
+        sku          = str(row.get("*Master SKU", "")).strip()
+
+        # Check status from sheet directly to avoid duplicate header confusion
+        current_status = str(ws.cell(row_number, status_col).value or "").strip()
+
+        if current_status in ("SUCCESS", "FAILED"):
+            results["skipped"] += 1
+            continue
+
+        if not order_id or not sku or not facility_raw:
+            ws.update_cell(row_number, status_col, "SKIPPED - missing data")
+            results["skipped"] += 1
+            continue
+
+        facility = WAREHOUSE_TO_FACILITY.get(facility_raw)
+        if not facility:
+            ws.update_cell(row_number, status_col, f"SKIPPED - unknown warehouse: {facility_raw}")
+            results["skipped"] += 1
+            continue
+
+        try:
+            payload = _build_order_payload(row, row_number)
+            data    = api_post(url, payload, facility=facility)
+
+            if data.get("successful"):
+                uc_code = data.get("saleOrderDetailDTO", {}).get("code", order_id)
+                ws.update_cell(row_number, status_col, f"SUCCESS - {uc_code}")
+                results["success"] += 1
+                print(f"  âœ“ Row {row_number} Order {order_id} â†’ {uc_code}")
+            else:
+                errors = data.get("errors", [])
+                msg    = errors[0].get("description") if errors else data.get("message", "Unknown error")
+                ws.update_cell(row_number, status_col, f"FAILED - {msg}")
+                results["failed"] += 1
+                results["errors"].append({"order_id": order_id, "error": msg})
+                print(f"  âœ— Row {row_number} Order {order_id} failed: {msg}")
+
+        except Exception as e:
+            ws.update_cell(row_number, status_col, f"ERROR - {str(e)[:100]}")
+            results["failed"] += 1
+            results["errors"].append({"order_id": order_id, "error": str(e)})
+            print(f"  âœ— Row {row_number} Order {order_id} exception: {e}")
+
+    return results
+
+
+================================================
+FILE: app/services/sheets.py
+================================================
+import json
+import os
+from datetime import datetime
+from typing import Optional
+
+import gspread
+from google.oauth2.service_account import Credentials
+
+SPREADSHEET_ID   = os.getenv("GOOGLE_SHEETS_ID")
+CREDENTIALS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS")  # full JSON string
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+FACILITY_SHORTNAME = {
+    "Emiza_B2C_BLR":    "BLR",
+    "Emiza_B2C_GGN":    "GGN",
+    "Emiza_B2C_Mumbai": "MUM",
+    "Emiza_B2C_WB":     "WB",
+}
+
+
+def _get_client() -> gspread.Client:
+    creds_dict = json.loads(CREDENTIALS_JSON)
+    creds      = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    return gspread.authorize(creds)
+
+
+def push_inventory_to_sheets(records: list[dict]) -> dict:
+    """
+    Groups records by facility and writes each into a dated tab.
+    Tab name format: GGN-2026-04-27
+    Returns summary of tabs created.
+    """
+    client        = _get_client()
+    spreadsheet   = client.open_by_key(SPREADSHEET_ID)
+    today         = datetime.now().strftime("%Y-%m-%d")
+    summary       = {}
+
+    # Group records by facility
+    by_facility: dict[str, list[dict]] = {}
+    for r in records:
+        code = r.get("facilityCode", "UNKNOWN")
+        by_facility.setdefault(code, []).append(r)
+
+    for facility_code, rows in by_facility.items():
+        short     = FACILITY_SHORTNAME.get(facility_code, facility_code)
+        tab_name  = f"{short}-{today}"
+
+        # Delete existing tab with same name if exists (re-run same day)
+        try:
+            existing = spreadsheet.worksheet(tab_name)
+            spreadsheet.del_worksheet(existing)
+            print(f"  Deleted existing tab: {tab_name}")
+        except gspread.exceptions.WorksheetNotFound:
+            pass
+
+        # Create fresh tab
+        ws = spreadsheet.add_worksheet(title=tab_name, rows=len(rows) + 5, cols=15)
+
+        # Headers
+        headers = [
+            "SKU Code",
+            "Facility Code",
+            "Location",
+            "Sellable Qty",
+            "Open Sale",
+            "Open Purchase",
+            "Putaway Pending",
+            "Blocked Qty",
+            "Pending Stock Transfer",
+            "Vendor Inventory",
+            "Virtual Inventory",
+            "Pending Assessment",
+            "Bad Inventory",
+            "Inventory Not Synced",
+            "Batch Recall Qty",
+        ]
+
+        # Build all data rows
+        data = [headers]
+        for r in rows:
+            data.append([
+                r.get("itemTypeSKU"),
+                r.get("facilityCode"),
+                r.get("facilityLocation"),
+                r.get("inventory", 0),
+                r.get("openSale", 0),
+                r.get("openPurchase", 0),
+                r.get("putawayPending", 0),
+                r.get("inventoryBlocked", 0),
+                r.get("pendingStockTransfer", 0),
+                r.get("vendorInventory", 0),
+                r.get("virtualInventory", 0),
+                r.get("pendingInventoryAssessment", 0),
+                r.get("badInventory", 0),
+                r.get("inventoryNotSynced", 0),
+                r.get("batchRecallQuantity", 0),
+            ])
+
+        # Write all at once (single API call per facility)
+        ws.update("A1", data)
+
+        # Format header row â€” bold + background
+        ws.format("A1:O1", {
+            "backgroundColor": {"red": 0.122, "green": 0.306, "blue": 0.475},
+            "textFormat":      {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+            "horizontalAlignment": "CENTER",
+        })
+
+        # Freeze header row
+        spreadsheet.batch_update({
+            "requests": [{
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": ws.id,
+                        "gridProperties": {"frozenRowCount": 1}
+                    },
+                    "fields": "gridProperties.frozenRowCount"
+                }
+            }]
+        })
+
+        print(f"  âœ“ Written {len(rows)} rows to tab: {tab_name}")
+        summary[tab_name] = len(rows)
+
+    return summary
 
