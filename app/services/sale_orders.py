@@ -151,7 +151,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
         # ── Append line item ───────────────────────────────────────────────
         item_code     = _s(row, "Sale Order Item Code*")
         sku           = _s(row, "Item SKU Code*")
-        shipping_meth = _s(row, "Shipping Method*") or "STD"
+        shipping_meth = _s(row, "Shipping Method*") or "SHIPROCKET"
         gift_wrap     = _s(row, "Gift Wrap", "FALSE").upper() in ("TRUE", "1", "YES")
         on_hold       = _s(row, "On Hold",   "FALSE").upper() in ("TRUE", "1", "YES")
 
