@@ -154,12 +154,12 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
                 _s(row, "Channel Order Processing Date as dd/MM/yyyy hh:mm:ss")
                 or _s(row, "Channel Order Processing Date as dd/MM/yyyy hh:mm:ss_1")
             ))
-            _opt(sale_order, "fulfillmentTat",           _parse_date(_s(row, "Fulfillment Tat")))
-            _opt(sale_order, "customerCode",             _s(row, "Customer Code"))
-            _opt(sale_order, "customerGSTIN",            _s(row, "Customer GSTIN"))
-            _opt(sale_order, "priority",                 _i(row, "Priority") or None)
-            _opt(sale_order, "shippingPackageTypeCode",  _s(row, "Shipping Package Type Code"))
-            _opt(sale_order, "parentSaleOrderCode",      _s(row, "Parent Sale Order Code"))
+            _opt(sale_order, "fulfillmentTat",          _parse_date(_s(row, "Fulfillment Tat")))
+            _opt(sale_order, "customerCode",            _s(row, "Customer Code"))
+            _opt(sale_order, "customerGSTIN",           _s(row, "Customer GSTIN"))
+            _opt(sale_order, "priority",                _i(row, "Priority") or None)
+            _opt(sale_order, "shippingPackageTypeCode", _s(row, "Shipping Package Type Code"))
+            _opt(sale_order, "parentSaleOrderCode",     _s(row, "Parent Sale Order Code"))
 
             # shippingProviders — order-level list per API spec
             tracking = _s(row, "Tracking Number")
@@ -170,12 +170,13 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
                     "trackingNumber": tracking,
                 }]
 
-            # saleOrderItemCombinations — order-level list per API spec
-            combo_id = _s(row, "Combination Identifier")
-            if combo_id:
+            # saleOrderItemCombinations — only when both fields are present
+            combo_id   = _s(row, "Combination Identifier")
+            combo_desc = _s(row, "Combination Description")
+            if combo_id and combo_desc:
                 sale_order["saleOrderItemCombinations"] = [{
                     "combinationIdentifier":  combo_id,
-                    "combinationDescription": _s(row, "Combination Description"),
+                    "combinationDescription": combo_desc,
                 }]
 
             orders[order_code] = {
@@ -212,37 +213,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
     return orders
 
 
-# ── STATUS COLUMN HELPER ──────────────────────────────────────────────────────
-def _find_or_create_status_col(ws, all_values: list) -> int:
-    raw_headers = all_values[0] if all_values else []
-
-    if "Order Status" in raw_headers:
-        return raw_headers.index("Order Status") + 1
-
-    sheet_props = ws.spreadsheet.fetch_sheet_metadata()
-    max_cols    = 26
-    for s in sheet_props.get("sheets", []):
-        props = s.get("properties", {})
-        if props.get("title") == ws.title:
-            max_cols = props.get("gridProperties", {}).get("columnCount", 26)
-            break
-
-    next_col = len(raw_headers) + 1
-    if next_col > max_cols:
-        ws.spreadsheet.batch_update({
-            "requests": [{
-                "appendDimension": {
-                    "sheetId":   ws.id,
-                    "dimension": "COLUMNS",
-                    "length":    1,
-                }
-            }]
-        })
-
-    ws.update_cell(1, next_col, "Order Status")
-    return next_col
-
-
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
 def process_sale_orders() -> dict:
     ws         = _get_sheet()
@@ -264,52 +234,26 @@ def process_sale_orders() -> dict:
             seen[h] = 0
             headers.append(h)
 
-    status_col = _find_or_create_status_col(ws, all_values)
-
-    records:      list[dict]     = []
-    row_index:    dict[str, int] = {}
-    status_cache: dict[str, str] = {}
-
-    for sheet_row, row_values in enumerate(all_values[1:], start=2):
+    records = []
+    for row_values in all_values[1:]:
         padded = row_values + [""] * (len(headers) - len(row_values))
-        row    = dict(zip(headers, padded))
-        records.append(row)
-
-        order_code = str(row.get("Sales Order Code*", "")).strip()
-        if not order_code:
-            continue
-
-        if order_code not in row_index:
-            row_index[order_code]    = sheet_row
-            status_val               = padded[status_col - 1] if status_col <= len(padded) else ""
-            status_cache[order_code] = str(status_val).strip()
+        records.append(dict(zip(headers, padded)))
 
     orders  = _group_rows_into_orders(records)
     url     = f"{TENANT_URL}/services/rest/v1/oms/saleOrder/create"
     results = {"success": 0, "failed": 0, "skipped": 0, "errors": []}
 
     for order_code, order_data in orders.items():
-        sheet_row      = row_index.get(order_code)
-        current_status = status_cache.get(order_code, "")
-
-        if current_status in ("SUCCESS", "FAILED"):
-            results["skipped"] += 1
-            continue
-
         facility = order_data.pop("_facility_code", "")
 
         if not facility:
-            status = "SKIPPED - missing Facility Code"
-            if sheet_row:
-                ws.update_cell(sheet_row, status_col, status)
             results["skipped"] += 1
+            results["errors"].append({"order_id": order_code, "error": "Missing Facility Code"})
             continue
 
         if not order_data["saleOrder"]["saleOrderItems"]:
-            status = "SKIPPED - no items"
-            if sheet_row:
-                ws.update_cell(sheet_row, status_col, status)
             results["skipped"] += 1
+            results["errors"].append({"order_id": order_code, "error": "No items"})
             continue
 
         try:
@@ -317,24 +261,18 @@ def process_sale_orders() -> dict:
 
             if data.get("successful"):
                 uc_code = data.get("saleOrderDetailDTO", {}).get("code", order_code)
-                status  = f"SUCCESS - {uc_code}"
                 results["success"] += 1
                 print(f"  ✔ Order {order_code} → {uc_code}")
             else:
                 errors = data.get("errors", [])
                 msg    = errors[0].get("description") if errors else data.get("message", "Unknown error")
-                status = f"FAILED - {msg}"
                 results["failed"] += 1
                 results["errors"].append({"order_id": order_code, "error": msg})
                 print(f"  ✗ Order {order_code} failed: {msg}")
 
         except Exception as e:
-            status = f"ERROR - {str(e)[:120]}"
             results["failed"] += 1
             results["errors"].append({"order_id": order_code, "error": str(e)})
             print(f"  ✗ Order {order_code} exception: {e}")
-
-        if sheet_row:
-            ws.update_cell(sheet_row, status_col, status)
 
     return results
