@@ -146,7 +146,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             _opt(sale_order, "shippingPackageTypeCode", _s(row, "Shipping Package Type Code"))
             _opt(sale_order, "parentSaleOrderCode",     _s(row, "Parent Sale Order Code"))
 
-            # shippingProviders — always Shiprocket1, no packetNumber
+            # shippingProviders — always Shiprocket1, no packetNumber at order level
             tracking = _s(row, "Tracking Number")
             sale_order["shippingProviders"] = [{
                 "code":           "Shiprocket1",
@@ -176,8 +176,8 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             "itemSku":            sku,
             "shippingMethodCode": "STD",
             "facilityCode":       _s(row, "Facility Code"),
-            "channelProductId":   sku,          # always same as SKU
-            "packetNumber":       quantity,     # packet = SKU quantity
+            "channelProductId":   sku,
+            "packetNumber":       quantity,   # packet number = quantity
             "giftWrap":           _b(row, "Gift Wrap"),
             "quantity":           quantity,
             "totalPrice":         _f(row, "Selling Price"),
