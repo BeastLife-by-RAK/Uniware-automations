@@ -116,7 +116,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             sale_order: dict = {
                 "code":                       order_code,
                 "displayOrderCode":           _s(row, "Display Sales Order Code") or order_code,
-                "channel":                    "INFLUENCER_MARKETING",
+                "channel":                    "INFLUENCERS_MARKETING",
                 "cashOnDelivery":             False,
                 "customerName":               ship_addr["name"],
                 "notificationMobile":         _s(row, "Notification Mobile") or ship_addr["phone"],
