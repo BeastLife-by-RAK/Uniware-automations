@@ -93,8 +93,9 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
 
         # ── Build order header on first encounter ────────────────────────────
         if order_code not in orders:
-            ship_addr_id = _s(row, "Shipping Address Id") or f"SHIP-{order_code}"
-            bill_addr_id = _s(row, "Billing Address Id")  or ship_addr_id
+            # Address ID is always "1"; billing always mirrors shipping
+            ship_addr_id = "1"
+            bill_addr_id = "1"
 
             ship_addr: dict = {
                 "id":           ship_addr_id,
@@ -110,34 +111,19 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             _opt(ship_addr, "latitude",     _s(row, "Shipping Address Latitude"))
             _opt(ship_addr, "longitude",    _s(row, "Shipping Address Longitude"))
 
+            # Billing always mirrors shipping — only one address entry needed
             addresses = [ship_addr]
-
-            if bill_addr_id != ship_addr_id:
-                bill_addr: dict = {
-                    "id":           bill_addr_id,
-                    "name":         _s(row, "Billing Address Name")    or ship_addr["name"],
-                    "addressLine1": _s(row, "Billing Address Line 1")  or ship_addr["addressLine1"],
-                    "city":         _s(row, "Billing Address City")    or ship_addr["city"],
-                    "state":        _s(row, "Billing Address State")   or ship_addr["state"],
-                    "country":      _s(row, "Billing Address Country") or ship_addr["country"],
-                    "pincode":      _s(row, "Billing Address Pincode") or ship_addr["pincode"],
-                    "phone":        _s(row, "Billing Address Phone")   or ship_addr["phone"],
-                }
-                _opt(bill_addr, "addressLine2", _s(row, "Billing Address Line 2"))
-                _opt(bill_addr, "latitude",     _s(row, "Billing Address Latitude"))
-                _opt(bill_addr, "longitude",    _s(row, "Billing Address Longitude"))
-                addresses.append(bill_addr)
 
             sale_order: dict = {
                 "code":                       order_code,
                 "displayOrderCode":           _s(row, "Display Sales Order Code") or order_code,
-                "channel":                    _s(row, "Channel") or "CUSTOM",
-                "cashOnDelivery":             _b(row, "COD*"),
+                "channel":                    _s(row, "Channel") or "influencer_marketing",
+                "cashOnDelivery":             False,
                 "customerName":               ship_addr["name"],
                 "notificationMobile":         _s(row, "Notification Mobile") or ship_addr["phone"],
                 "currencyCode":               _s(row, "Currency Code") or "INR",
                 "totalPrepaidAmount":         _f(row, "Prepaid Amount"),
-                "totalCashOnDeliveryCharges": _f(row, "COD Service Charges"),
+                "totalCashOnDeliveryCharges": 0,
                 "totalDiscount":              _f(row, "Discount"),
                 "totalShippingCharges":       _f(row, "Order Total Shipping Charges"),
                 "totalGiftWrapCharges":       _f(row, "Gift Wrap Charges"),
@@ -149,6 +135,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             }
 
             # Optional order-level scalar fields
+            # Order Date and Channel Processing Date intentionally left empty
             _opt(sale_order, "displayOrderDateTime",  _parse_date(_s(row, "Order Date as dd/mm/yyyy hh:MM:ss")))
             _opt(sale_order, "channelProcessingTime", _parse_date(
                 _s(row, "Channel Order Processing Date as dd/MM/yyyy hh:mm:ss")
@@ -161,14 +148,13 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             _opt(sale_order, "shippingPackageTypeCode", _s(row, "Shipping Package Type Code"))
             _opt(sale_order, "parentSaleOrderCode",     _s(row, "Parent Sale Order Code"))
 
-            # shippingProviders — order-level list per API spec
+            # shippingProviders — default provider is Shiprocket1
             tracking = _s(row, "Tracking Number")
-            if tracking:
-                sale_order["shippingProviders"] = [{
-                    "packetNumber":   _i(row, "Packet Number", 1),
-                    "code":           _s(row, "Shipping Provider"),
-                    "trackingNumber": tracking,
-                }]
+            sale_order["shippingProviders"] = [{
+                "packetNumber":   1,
+                "code":           _s(row, "Shipping Provider") or "Shiprocket1",
+                "trackingNumber": tracking,
+            }]
 
             # saleOrderItemCombinations — only when both fields are present
             combo_id   = _s(row, "Combination Identifier")
@@ -185,14 +171,17 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             }
 
         # ── Append line item ─────────────────────────────────────────────────
+        sku = _s(row, "Item SKU Code*")
+
         item: dict = {
             "code":               _s(row, "Sale Order Item Code*"),
-            "itemSku":            _s(row, "Item SKU Code*"),
-            "shippingMethodCode": _s(row, "Shipping Method*") or "SHIPROCKET",
+            "itemSku":            sku,
+            "shippingMethodCode": _s(row, "Shipping Method*") or "STD",
             "facilityCode":       _s(row, "Facility Code"),
-            "packetNumber":       _i(row, "Packet Number", 1),
+            "channelProductId":   _s(row, "Channel Product Id") or sku,
             "giftWrap":           _b(row, "Gift Wrap"),
-            "onHold":             _b(row, "On Hold"),
+            # packetNumber intentionally omitted — decided later
+            # onHold intentionally omitted — decided later
             "quantity":           _i(row, "Quantity", 1),
             "totalPrice":         _f(row, "Selling Price"),
             "sellingPrice":       _f(row, "Selling Price"),
