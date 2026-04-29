@@ -196,7 +196,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             "quantity":           _i(row, "Quantity", 1),
             "totalPrice":         _f(row, "Selling Price"),
             "sellingPrice":       _f(row, "Selling Price"),
-            "prepaidAmount":      _f(row, "Prepaid Amount"),
             "discount":           _f(row, "Discount"),
             "shippingCharges":    _f(row, "Shipping Charges"),
             "storeCredit":        _f(row, "Store Credit"),
