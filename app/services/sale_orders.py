@@ -19,7 +19,6 @@ SCOPES = [
 
 
 # ── GOOGLE SHEETS CLIENT ──────────────────────────────────────────────────────
-
 def _get_sheet():
     creds_dict = json.loads(CREDENTIALS_JSON)
     creds      = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
@@ -28,9 +27,8 @@ def _get_sheet():
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
-
 def _s(row: dict, key: str, default: str = "") -> str:
-    return row.get(key, default) or default
+    return str(row.get(key) or default).strip()
 
 
 def _f(row: dict, key: str) -> float:
@@ -40,9 +38,41 @@ def _f(row: dict, key: str) -> float:
         return 0.0
 
 
-def _parse_order_date(raw: str) -> str:
+def _i(row: dict, key: str, default: int = 0) -> int:
+    try:
+        return int(float(row.get(key) or default))
+    except (ValueError, TypeError):
+        return default
+
+
+def _b(row: dict, key: str, default: bool = False) -> bool:
+    val = _s(row, key).upper()
+    if val in ("TRUE", "1", "YES"):
+        return True
+    if val in ("FALSE", "0", "NO"):
+        return False
+    return default
+
+
+def _opt(d: dict, key: str, value) -> None:
+    """Set key on dict only when value is non-empty / non-None."""
+    if value is not None and value != "":
+        d[key] = value
+
+
+def _parse_date(raw: str) -> str | None:
+    if not raw:
+        return None
     raw = raw.strip()
-    for fmt in ("%d/%m/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    for fmt in (
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+        "%d-%m-%Y %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
         try:
             return datetime.strptime(raw, fmt).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         except ValueError:
@@ -51,128 +81,118 @@ def _parse_order_date(raw: str) -> str:
 
 
 # ── GROUP ROWS INTO ORDERS ────────────────────────────────────────────────────
-
 def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
-    """
-    Groups sheet rows by Sales Order Code* into single API payloads.
-    Rows with no Sales Order Code* are skipped.
-    Multi-row orders (multiple SKUs) are merged into one payload.
-    """
     orders: dict[str, dict] = {}
 
     for raw_row in records:
-        # Strip every value once
         row = {k: str(v).strip() if v is not None else "" for k, v in raw_row.items()}
 
         order_code = row.get("Sales Order Code*", "")
         if not order_code:
             continue
 
-        # ── Build order header on first encounter ─────────────────────────
+        # ── Build order header on first encounter ────────────────────────────
         if order_code not in orders:
             ship_addr_id = _s(row, "Shipping Address Id") or f"SHIP-{order_code}"
             bill_addr_id = _s(row, "Billing Address Id")  or ship_addr_id
 
-            ship_name    = _s(row, "Shipping Address Name")
-            ship_line1   = _s(row, "Shipping Address Line 1")
-            ship_line2   = _s(row, "Shipping Address Line 2")
-            ship_city    = _s(row, "Shipping Address City")
-            ship_state   = _s(row, "Shipping Address State")
-            ship_country = _s(row, "Shipping Address Country") or "India"
-            ship_pincode = _s(row, "Shipping Address Pincode")
-            ship_phone   = _s(row, "Shipping Address Phone")
-
-            bill_name    = _s(row, "Billing Address Name")    or ship_name
-            bill_line1   = _s(row, "Billing Address Line 1")  or ship_line1
-            bill_line2   = _s(row, "Billing Address Line 2")  or ship_line2
-            bill_city    = _s(row, "Billing Address City")    or ship_city
-            bill_state   = _s(row, "Billing Address State")   or ship_state
-            bill_country = _s(row, "Billing Address Country") or ship_country
-            bill_pincode = _s(row, "Billing Address Pincode") or ship_pincode
-            bill_phone   = _s(row, "Billing Address Phone")   or ship_phone
-
-            mobile       = _s(row, "Notification Mobile") or ship_phone
-            cod          = _s(row, "COD*", "FALSE").upper() in ("TRUE", "1", "YES")
-            channel      = _s(row, "Channel") or "CUSTOM"
-            display_code = _s(row, "Display Sales Order Code") or order_code
-            order_date   = _parse_order_date(_s(row, "Order Date as dd/mm/yyyy hh:MM:ss"))
-            currency     = _s(row, "Currency Code") or "INR"
-            facility     = _s(row, "Facility Code")
-
-            addresses = [{
+            ship_addr: dict = {
                 "id":           ship_addr_id,
-                "name":         ship_name,
-                "addressLine1": ship_line1,
-                "addressLine2": ship_line2,
-                "city":         ship_city,
-                "state":        ship_state,
-                "country":      ship_country,
-                "pincode":      ship_pincode,
-                "phone":        ship_phone,
-            }]
+                "name":         _s(row, "Shipping Address Name"),
+                "addressLine1": _s(row, "Shipping Address Line 1"),
+                "city":         _s(row, "Shipping Address City"),
+                "state":        _s(row, "Shipping Address State"),
+                "country":      _s(row, "Shipping Address Country") or "India",
+                "pincode":      _s(row, "Shipping Address Pincode"),
+                "phone":        _s(row, "Shipping Address Phone"),
+            }
+            _opt(ship_addr, "addressLine2", _s(row, "Shipping Address Line 2"))
+            _opt(ship_addr, "latitude",     _s(row, "Shipping Address Latitude"))
+            _opt(ship_addr, "longitude",    _s(row, "Shipping Address Longitude"))
+
+            addresses = [ship_addr]
 
             if bill_addr_id != ship_addr_id:
-                addresses.append({
+                bill_addr: dict = {
                     "id":           bill_addr_id,
-                    "name":         bill_name,
-                    "addressLine1": bill_line1,
-                    "addressLine2": bill_line2,
-                    "city":         bill_city,
-                    "state":        bill_state,
-                    "country":      bill_country,
-                    "pincode":      bill_pincode,
-                    "phone":        bill_phone,
-                })
+                    "name":         _s(row, "Billing Address Name")    or ship_addr["name"],
+                    "addressLine1": _s(row, "Billing Address Line 1")  or ship_addr["addressLine1"],
+                    "city":         _s(row, "Billing Address City")    or ship_addr["city"],
+                    "state":        _s(row, "Billing Address State")   or ship_addr["state"],
+                    "country":      _s(row, "Billing Address Country") or ship_addr["country"],
+                    "pincode":      _s(row, "Billing Address Pincode") or ship_addr["pincode"],
+                    "phone":        _s(row, "Billing Address Phone")   or ship_addr["phone"],
+                }
+                _opt(bill_addr, "addressLine2", _s(row, "Billing Address Line 2"))
+                _opt(bill_addr, "latitude",     _s(row, "Billing Address Latitude"))
+                _opt(bill_addr, "longitude",    _s(row, "Billing Address Longitude"))
+                addresses.append(bill_addr)
 
-            orders[order_code] = {
-                "_facility_code": facility,
-                "saleOrder": {
-                    "code":                       order_code,
-                    "displayOrderCode":           display_code,
-                    "displayOrderDateTime":       order_date,
-                    "customerName":               ship_name,
-                    "notificationMobile":         mobile,
-                    "channel":                    channel,
-                    "cashOnDelivery":             cod,
-                    "currencyCode":               currency,
-                    "totalPrepaidAmount":         _f(row, "Prepaid Amount"),
-                    "totalCashOnDeliveryCharges": _f(row, "COD Service Charges"),
-                    "totalDiscount":              _f(row, "Discount"),
-                    "totalShippingCharges":       _f(row, "Order Total Shipping Charges"),
-                    "totalGiftWrapCharges":       _f(row, "Gift Wrap Charges"),
-                    "totalStoreCredit":           _f(row, "Store Credit"),
-                    "addresses":                  addresses,
-                    "shippingAddress":            {"referenceId": ship_addr_id},
-                    "billingAddress":             {"referenceId": bill_addr_id},
-                    "saleOrderItems":             [],
-                },
+            sale_order: dict = {
+                "code":                       order_code,
+                "displayOrderCode":           _s(row, "Display Sales Order Code") or order_code,
+                "channel":                    _s(row, "Channel") or "CUSTOM",
+                "cashOnDelivery":             _b(row, "COD*"),
+                "customerName":               ship_addr["name"],
+                "notificationMobile":         _s(row, "Notification Mobile") or ship_addr["phone"],
+                "currencyCode":               _s(row, "Currency Code") or "INR",
+                "totalPrepaidAmount":         _f(row, "Prepaid Amount"),
+                "totalCashOnDeliveryCharges": _f(row, "COD Service Charges"),
+                "totalDiscount":              _f(row, "Discount"),
+                "totalShippingCharges":       _f(row, "Order Total Shipping Charges"),
+                "totalGiftWrapCharges":       _f(row, "Gift Wrap Charges"),
+                "totalStoreCredit":           _f(row, "Store Credit"),
+                "addresses":                  addresses,
+                "shippingAddress":            {"referenceId": ship_addr_id},
+                "billingAddress":             {"referenceId": bill_addr_id},
+                "saleOrderItems":             [],
             }
 
-        # ── Append line item ───────────────────────────────────────────────
-        item_code     = _s(row, "Sale Order Item Code*")
-        sku           = _s(row, "Item SKU Code*")
-        shipping_meth = _s(row, "Shipping Method*") or "SHIPROCKET"
-        gift_wrap     = _s(row, "Gift Wrap", "FALSE").upper() in ("TRUE", "1", "YES")
-        on_hold       = _s(row, "On Hold",   "FALSE").upper() in ("TRUE", "1", "YES")
+            # Optional order-level scalar fields
+            _opt(sale_order, "displayOrderDateTime",  _parse_date(_s(row, "Order Date as dd/mm/yyyy hh:MM:ss")))
+            _opt(sale_order, "channelProcessingTime", _parse_date(
+                _s(row, "Channel Order Processing Date as dd/MM/yyyy hh:mm:ss")
+                or _s(row, "Channel Order Processing Date as dd/MM/yyyy hh:mm:ss_1")
+            ))
+            _opt(sale_order, "fulfillmentTat",           _parse_date(_s(row, "Fulfillment Tat")))
+            _opt(sale_order, "customerCode",             _s(row, "Customer Code"))
+            _opt(sale_order, "customerGSTIN",            _s(row, "Customer GSTIN"))
+            _opt(sale_order, "priority",                 _i(row, "Priority") or None)
+            _opt(sale_order, "shippingPackageTypeCode",  _s(row, "Shipping Package Type Code"))
+            _opt(sale_order, "parentSaleOrderCode",      _s(row, "Parent Sale Order Code"))
 
-        try:
-            quantity   = int(float(row.get("Quantity")     or 1))
-        except (ValueError, TypeError):
-            quantity   = 1
-        try:
-            packet_num = int(float(row.get("Packet Number") or 1))
-        except (ValueError, TypeError):
-            packet_num = 1
+            # shippingProviders — order-level list per API spec
+            tracking = _s(row, "Tracking Number")
+            if tracking:
+                sale_order["shippingProviders"] = [{
+                    "packetNumber":   _i(row, "Packet Number", 1),
+                    "code":           _s(row, "Shipping Provider"),
+                    "trackingNumber": tracking,
+                }]
 
-        item = {
-            "code":               item_code,
-            "itemSku":            sku,
-            "shippingMethodCode": shipping_meth,
+            # saleOrderItemCombinations — order-level list per API spec
+            combo_id = _s(row, "Combination Identifier")
+            if combo_id:
+                sale_order["saleOrderItemCombinations"] = [{
+                    "combinationIdentifier":  combo_id,
+                    "combinationDescription": _s(row, "Combination Description"),
+                }]
+
+            orders[order_code] = {
+                "_facility_code": _s(row, "Facility Code"),
+                "saleOrder": sale_order,
+            }
+
+        # ── Append line item ─────────────────────────────────────────────────
+        item: dict = {
+            "code":               _s(row, "Sale Order Item Code*"),
+            "itemSku":            _s(row, "Item SKU Code*"),
+            "shippingMethodCode": _s(row, "Shipping Method*") or "SHIPROCKET",
             "facilityCode":       _s(row, "Facility Code"),
-            "packetNumber":       packet_num,
-            "giftWrap":           gift_wrap,
-            "onHold":             on_hold,
-            "quantity":           quantity,
+            "packetNumber":       _i(row, "Packet Number", 1),
+            "giftWrap":           _b(row, "Gift Wrap"),
+            "onHold":             _b(row, "On Hold"),
+            "quantity":           _i(row, "Quantity", 1),
             "totalPrice":         _f(row, "Selling Price"),
             "sellingPrice":       _f(row, "Selling Price"),
             "prepaidAmount":      _f(row, "Prepaid Amount"),
@@ -182,14 +202,10 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             "giftWrapCharges":    _f(row, "Gift Wrap Charges"),
         }
 
-        voucher = _s(row, "Voucher Code")
-        if voucher:
-            item["voucherCode"]  = voucher
+        _opt(item, "giftMessage", _s(row, "Gift Message"))
+        _opt(item, "voucherCode", _s(row, "Voucher Code"))
+        if _s(row, "Voucher Code"):
             item["voucherValue"] = _f(row, "Voucher Value")
-
-        tracking = _s(row, "Tracking Number")
-        if tracking:
-            item["trackingNumber"] = tracking
 
         orders[order_code]["saleOrder"]["saleOrderItems"].append(item)
 
@@ -197,7 +213,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
 
 
 # ── STATUS COLUMN HELPER ──────────────────────────────────────────────────────
-
 def _find_or_create_status_col(ws, all_values: list) -> int:
     raw_headers = all_values[0] if all_values else []
 
@@ -229,7 +244,6 @@ def _find_or_create_status_col(ws, all_values: list) -> int:
 
 
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
-
 def process_sale_orders() -> dict:
     ws         = _get_sheet()
     all_values = ws.get_all_values()
@@ -239,7 +253,7 @@ def process_sale_orders() -> dict:
 
     raw_headers = all_values[0]
 
-    # De-duplicate headers (handles the two "Date" columns in this sheet)
+    # De-duplicate headers (handles repeated column names e.g. two date cols)
     seen    = {}
     headers = []
     for h in raw_headers:
@@ -250,10 +264,8 @@ def process_sale_orders() -> dict:
             seen[h] = 0
             headers.append(h)
 
-    # Find status column index upfront so we can read all statuses in one pass
     status_col = _find_or_create_status_col(ws, all_values)
 
-    # Build per-row dicts, track earliest sheet row per order, cache statuses
     records:      list[dict]     = []
     row_index:    dict[str, int] = {}
     status_cache: dict[str, str] = {}
@@ -269,13 +281,10 @@ def process_sale_orders() -> dict:
 
         if order_code not in row_index:
             row_index[order_code]    = sheet_row
-            # Status is in the same row_values if the column already exists
-            status_val = padded[status_col - 1] if status_col <= len(padded) else ""
+            status_val               = padded[status_col - 1] if status_col <= len(padded) else ""
             status_cache[order_code] = str(status_val).strip()
 
-    # Group into orders (only new ones will be processed below)
-    orders = _group_rows_into_orders(records)
-
+    orders  = _group_rows_into_orders(records)
     url     = f"{TENANT_URL}/services/rest/v1/oms/saleOrder/create"
     results = {"success": 0, "failed": 0, "skipped": 0, "errors": []}
 
@@ -283,7 +292,6 @@ def process_sale_orders() -> dict:
         sheet_row      = row_index.get(order_code)
         current_status = status_cache.get(order_code, "")
 
-        # Skip already processed orders
         if current_status in ("SUCCESS", "FAILED"):
             results["skipped"] += 1
             continue
