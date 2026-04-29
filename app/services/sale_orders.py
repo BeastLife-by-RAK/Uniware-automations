@@ -150,6 +150,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             tracking = _s(row, "Tracking Number")
             sale_order["shippingProviders"] = [{
                 "code":           "Shiprocket1",
+                "packetNumber":   1,
                 "trackingNumber": tracking,
             }]
 
