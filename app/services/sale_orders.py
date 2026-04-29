@@ -93,12 +93,11 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
 
         # ── Build order header on first encounter ────────────────────────────
         if order_code not in orders:
-            # Address ID is always "1"; billing always mirrors shipping
-            ship_addr_id = "1"
-            bill_addr_id = "1"
+            # Address ID always "1"; billing always mirrors shipping
+            addr_id = "1"
 
             ship_addr: dict = {
-                "id":           ship_addr_id,
+                "id":           addr_id,
                 "name":         _s(row, "Shipping Address Name"),
                 "addressLine1": _s(row, "Shipping Address Line 1"),
                 "city":         _s(row, "Shipping Address City"),
@@ -111,13 +110,13 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             _opt(ship_addr, "latitude",     _s(row, "Shipping Address Latitude"))
             _opt(ship_addr, "longitude",    _s(row, "Shipping Address Longitude"))
 
-            # Billing always mirrors shipping — only one address entry needed
+            # Billing mirrors shipping — single address entry, same referenceId
             addresses = [ship_addr]
 
             sale_order: dict = {
                 "code":                       order_code,
                 "displayOrderCode":           _s(row, "Display Sales Order Code") or order_code,
-                "channel":                    _s(row, "Channel") or "influencer_marketing",
+                "channel":                    "INFLUENCER_MARKETING",
                 "cashOnDelivery":             False,
                 "customerName":               ship_addr["name"],
                 "notificationMobile":         _s(row, "Notification Mobile") or ship_addr["phone"],
@@ -129,13 +128,12 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
                 "totalGiftWrapCharges":       _f(row, "Gift Wrap Charges"),
                 "totalStoreCredit":           _f(row, "Store Credit"),
                 "addresses":                  addresses,
-                "shippingAddress":            {"referenceId": ship_addr_id},
-                "billingAddress":             {"referenceId": bill_addr_id},
+                "shippingAddress":            {"referenceId": addr_id},
+                "billingAddress":             {"referenceId": addr_id},
                 "saleOrderItems":             [],
             }
 
-            # Optional order-level scalar fields
-            # Order Date and Channel Processing Date intentionally left empty
+            # Optional order-level fields
             _opt(sale_order, "displayOrderDateTime",  _parse_date(_s(row, "Order Date as dd/mm/yyyy hh:MM:ss")))
             _opt(sale_order, "channelProcessingTime", _parse_date(
                 _s(row, "Channel Order Processing Date as dd/MM/yyyy hh:mm:ss")
@@ -148,15 +146,14 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             _opt(sale_order, "shippingPackageTypeCode", _s(row, "Shipping Package Type Code"))
             _opt(sale_order, "parentSaleOrderCode",     _s(row, "Parent Sale Order Code"))
 
-            # shippingProviders — default provider is Shiprocket1
+            # shippingProviders — always Shiprocket1, no packetNumber
             tracking = _s(row, "Tracking Number")
             sale_order["shippingProviders"] = [{
-                "packetNumber":   1,
-                "code":           _s(row, "Shipping Provider") or "Shiprocket1",
+                "code":           "Shiprocket1",
                 "trackingNumber": tracking,
             }]
 
-            # saleOrderItemCombinations — only when both fields are present
+            # saleOrderItemCombinations — only when both fields present
             combo_id   = _s(row, "Combination Identifier")
             combo_desc = _s(row, "Combination Description")
             if combo_id and combo_desc:
@@ -171,18 +168,18 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             }
 
         # ── Append line item ─────────────────────────────────────────────────
-        sku = _s(row, "Item SKU Code*")
+        sku      = _s(row, "Item SKU Code*")
+        quantity = _i(row, "Quantity", 1)
 
         item: dict = {
             "code":               _s(row, "Sale Order Item Code*"),
             "itemSku":            sku,
-            "shippingMethodCode": _s(row, "Shipping Method*") or "STD",
+            "shippingMethodCode": "STD",
             "facilityCode":       _s(row, "Facility Code"),
-            "channelProductId":   _s(row, "Channel Product Id") or sku,
+            "channelProductId":   sku,          # always same as SKU
+            "packetNumber":       quantity,     # packet = SKU quantity
             "giftWrap":           _b(row, "Gift Wrap"),
-            # packetNumber intentionally omitted — decided later
-            # onHold intentionally omitted — decided later
-            "quantity":           _i(row, "Quantity", 1),
+            "quantity":           quantity,
             "totalPrice":         _f(row, "Selling Price"),
             "sellingPrice":       _f(row, "Selling Price"),
             "discount":           _f(row, "Discount"),
