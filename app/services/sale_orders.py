@@ -151,7 +151,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             # shippingProviders — default provider is Shiprocket1
             tracking = _s(row, "Tracking Number")
             sale_order["shippingProviders"] = [{
-                "packetNumber":   1,
                 "code":           _s(row, "Shipping Provider") or "Shiprocket1",
                 "trackingNumber": tracking,
             }]
