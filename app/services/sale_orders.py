@@ -91,9 +91,8 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
         if not order_code:
             continue
 
-        # ── Build order header on first encounter ────────────────────────────
+        # ── Build order header on first encounter ──────────────────────────
         if order_code not in orders:
-            # Address ID always "1"; billing always mirrors shipping
             addr_id = "1"
 
             ship_addr: dict = {
@@ -110,7 +109,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             _opt(ship_addr, "latitude",     _s(row, "Shipping Address Latitude"))
             _opt(ship_addr, "longitude",    _s(row, "Shipping Address Longitude"))
 
-            # Billing mirrors shipping — single address entry, same referenceId
             addresses = [ship_addr]
 
             sale_order: dict = {
@@ -133,7 +131,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
                 "saleOrderItems":             [],
             }
 
-            # Optional order-level fields
             _opt(sale_order, "displayOrderDateTime",  _parse_date(_s(row, "Order Date as dd/mm/yyyy hh:MM:ss")))
             _opt(sale_order, "channelProcessingTime", _parse_date(
                 _s(row, "Channel Order Processing Date as dd/MM/yyyy hh:mm:ss")
@@ -146,7 +143,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             _opt(sale_order, "shippingPackageTypeCode", _s(row, "Shipping Package Type Code"))
             _opt(sale_order, "parentSaleOrderCode",     _s(row, "Parent Sale Order Code"))
 
-            # shippingProviders — always Shiprocket1, no packetNumber at order level
             tracking = _s(row, "Tracking Number")
             sale_order["shippingProviders"] = [{
                 "code":           "Shiprocket1",
@@ -154,7 +150,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
                 "trackingNumber": tracking,
             }]
 
-            # saleOrderItemCombinations — only when both fields present
             combo_id   = _s(row, "Combination Identifier")
             combo_desc = _s(row, "Combination Description")
             if combo_id and combo_desc:
@@ -168,7 +163,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
                 "saleOrder": sale_order,
             }
 
-        # ── Append line item ─────────────────────────────────────────────────
+        # ── Append line item ───────────────────────────────────────────────
         sku      = _s(row, "Item SKU Code*")
         quantity = _i(row, "Quantity", 1)
 
@@ -178,7 +173,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             "shippingMethodCode": "STD",
             "facilityCode":       _s(row, "Facility Code"),
             "channelProductId":   sku,
-            "packetNumber":       quantity,   # packet number = quantity
+            "packetNumber":       1,          # FIX: packet number is box/shipment index, not quantity
             "giftWrap":           _b(row, "Gift Wrap"),
             "quantity":           quantity,
             "totalPrice":         _f(row, "Selling Price"),
