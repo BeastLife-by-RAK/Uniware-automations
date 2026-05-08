@@ -25,9 +25,6 @@ def fetch_inventory(
     url            = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
     facility_codes = fetch_facilities()
 
-    if not updated_since_minutes and not sku_list:
-        updated_since_minutes = 1440
-
     all_records = []
     seen_keys   = set()
 
@@ -35,7 +32,7 @@ def fetch_inventory(
         payload = {}
         if sku_list:
             payload["itemTypeSKUs"] = sku_list
-        if updated_since_minutes:
+        if updated_since_minutes is not None:
             payload["updatedSinceInMinutes"] = updated_since_minutes
 
         try:
@@ -54,7 +51,7 @@ def fetch_inventory(
                         r["facilityCode"]     = code
                         r["facilityLocation"] = FACILITY_MAP.get(code, code)
                         all_records.append(r)
-                print(f"  ✓ Facility {code} ({FACILITY_MAP.get(code)}): {len(records)} SKUs")
+                print(f"  ✔ Facility {code} ({FACILITY_MAP.get(code)}): {len(records)} SKUs")
             else:
                 print(f"  ⚠ Facility {code}: {data.get('message')} | errors: {data.get('errors')}")
 

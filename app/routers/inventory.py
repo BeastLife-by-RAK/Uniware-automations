@@ -23,8 +23,8 @@ def list_facilities():
 def get_inventory(
     format: str = Query("json", description="Response format: json or excel"),
     updated_since_minutes: Optional[int] = Query(
-        1440,
-        description="Only SKUs updated in last N minutes. Default 1440 (24h). Max 1440."
+        None,
+        description="Only SKUs updated in last N minutes. Omit for full snapshot."
     ),
     skus: Optional[str] = Query(
         None,
@@ -36,7 +36,7 @@ def get_inventory(
 
     - **format=json** → raw JSON (default)
     - **format=excel** → downloadable .xlsx file
-    - **updated_since_minutes** → SKUs updated in last N minutes (default 1440 = 24h)
+    - **updated_since_minutes** → SKUs updated in last N minutes. Omit for full snapshot.
     - **skus** → filter to specific SKUs
     """
     sku_list = [s.strip() for s in skus.split(",")] if skus else None
@@ -62,8 +62,8 @@ def get_inventory(
 @router.post("/push-to-sheets")
 def push_to_sheets(
     updated_since_minutes: Optional[int] = Query(
-        1440,
-        description="Only SKUs updated in last N minutes. Default 1440 (24h)."
+        None,
+        description="Only SKUs updated in last N minutes. Omit for full snapshot."
     ),
 ):
     """
