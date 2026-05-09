@@ -14,9 +14,8 @@ FACILITY_MAP = {
 }
 
 # Unicommerce requires updatedSinceInMinutes or itemTypeSKUs — never accepts an empty body.
-# The docs publish no explicit ceiling; 43800 (≈ 30 years) is the largest safe value
-# that comfortably fits in a signed 32-bit integer and is accepted in practice.
-_FULL_SNAPSHOT_MINUTES = 43_800
+# Hard limit confirmed from API error: "You can query for only one day snapshots" → max 1440 minutes.
+_FULL_SNAPSHOT_MINUTES = 1_440
 
 
 def fetch_facilities() -> list[str]:
