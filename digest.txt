@@ -257,8 +257,8 @@ def list_facilities():
 def get_inventory(
     format: str = Query("json", description="Response format: json or excel"),
     updated_since_minutes: Optional[int] = Query(
-        1440,
-        description="Only SKUs updated in last N minutes. Default 1440 (24h). Max 1440."
+        None,
+        description="Only SKUs updated in last N minutes. Omit for full snapshot."
     ),
     skus: Optional[str] = Query(
         None,
@@ -270,7 +270,7 @@ def get_inventory(
 
     - **format=json** â†’ raw JSON (default)
     - **format=excel** â†’ downloadable .xlsx file
-    - **updated_since_minutes** â†’ SKUs updated in last N minutes (default 1440 = 24h)
+    - **updated_since_minutes** â†’ SKUs updated in last N minutes. Omit for full snapshot.
     - **skus** â†’ filter to specific SKUs
     """
     sku_list = [s.strip() for s in skus.split(",")] if skus else None
@@ -296,8 +296,8 @@ def get_inventory(
 @router.post("/push-to-sheets")
 def push_to_sheets(
     updated_since_minutes: Optional[int] = Query(
-        1440,
-        description="Only SKUs updated in last N minutes. Default 1440 (24h)."
+        None,
+        description="Only SKUs updated in last N minutes. Omit for full snapshot."
     ),
 ):
     """
@@ -593,9 +593,6 @@ def fetch_inventory(
     url            = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
     facility_codes = fetch_facilities()
 
-    if not updated_since_minutes and not sku_list:
-        updated_since_minutes = 1440
-
     all_records = []
     seen_keys   = set()
 
@@ -603,7 +600,7 @@ def fetch_inventory(
         payload = {}
         if sku_list:
             payload["itemTypeSKUs"] = sku_list
-        if updated_since_minutes:
+        if updated_since_minutes is not None:
             payload["updatedSinceInMinutes"] = updated_since_minutes
 
         try:
@@ -622,7 +619,7 @@ def fetch_inventory(
                         r["facilityCode"]     = code
                         r["facilityLocation"] = FACILITY_MAP.get(code, code)
                         all_records.append(r)
-                print(f"  âœ“ Facility {code} ({FACILITY_MAP.get(code)}): {len(records)} SKUs")
+                print(f"  âœ” Facility {code} ({FACILITY_MAP.get(code)}): {len(records)} SKUs")
             else:
                 print(f"  âš  Facility {code}: {data.get('message')} | errors: {data.get('errors')}")
 
@@ -1005,9 +1002,8 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
         if not order_code:
             continue
 
-        # â”€â”€ Build order header on first encounter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # â”€â”€ Build order header on first encounter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if order_code not in orders:
-            # Address ID always "1"; billing always mirrors shipping
             addr_id = "1"
 
             ship_addr: dict = {
@@ -1024,7 +1020,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             _opt(ship_addr, "latitude",     _s(row, "Shipping Address Latitude"))
             _opt(ship_addr, "longitude",    _s(row, "Shipping Address Longitude"))
 
-            # Billing mirrors shipping â€” single address entry, same referenceId
             addresses = [ship_addr]
 
             sale_order: dict = {
@@ -1047,7 +1042,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
                 "saleOrderItems":             [],
             }
 
-            # Optional order-level fields
             _opt(sale_order, "displayOrderDateTime",  _parse_date(_s(row, "Order Date as dd/mm/yyyy hh:MM:ss")))
             _opt(sale_order, "channelProcessingTime", _parse_date(
                 _s(row, "Channel Order Processing Date as dd/MM/yyyy hh:mm:ss")
@@ -1060,7 +1054,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             _opt(sale_order, "shippingPackageTypeCode", _s(row, "Shipping Package Type Code"))
             _opt(sale_order, "parentSaleOrderCode",     _s(row, "Parent Sale Order Code"))
 
-            # shippingProviders â€” always Shiprocket1, no packetNumber at order level
             tracking = _s(row, "Tracking Number")
             sale_order["shippingProviders"] = [{
                 "code":           "Shiprocket1",
@@ -1068,7 +1061,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
                 "trackingNumber": tracking,
             }]
 
-            # saleOrderItemCombinations â€” only when both fields present
             combo_id   = _s(row, "Combination Identifier")
             combo_desc = _s(row, "Combination Description")
             if combo_id and combo_desc:
@@ -1082,7 +1074,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
                 "saleOrder": sale_order,
             }
 
-        # â”€â”€ Append line item â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # â”€â”€ Append line item â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         sku      = _s(row, "Item SKU Code*")
         quantity = _i(row, "Quantity", 1)
 
@@ -1092,7 +1084,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             "shippingMethodCode": "STD",
             "facilityCode":       _s(row, "Facility Code"),
             "channelProductId":   sku,
-            "packetNumber":       quantity,   # packet number = quantity
+            "packetNumber":       1,          # FIX: packet number is box/shipment index, not quantity
             "giftWrap":           _b(row, "Gift Wrap"),
             "quantity":           quantity,
             "totalPrice":         _f(row, "Selling Price"),

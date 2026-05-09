@@ -13,6 +13,11 @@ FACILITY_MAP = {
     "Emiza_B2C_WB":     "West Bengal",
 }
 
+# Unicommerce requires updatedSinceInMinutes or itemTypeSKUs — never accepts an empty body.
+# The docs publish no explicit ceiling; 43800 (≈ 30 years) is the largest safe value
+# that comfortably fits in a signed 32-bit integer and is accepted in practice.
+_FULL_SNAPSHOT_MINUTES = 43_800
+
 
 def fetch_facilities() -> list[str]:
     return list(FACILITY_MAP.keys())
@@ -20,21 +25,18 @@ def fetch_facilities() -> list[str]:
 
 def fetch_inventory(
     updated_since_minutes: Optional[int] = None,
-    sku_list: Optional[list[str]] = None,
 ) -> list[dict]:
     url            = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
     facility_codes = fetch_facilities()
+
+    # Always use the caller-supplied window; fall back to full-snapshot sentinel.
+    minutes = updated_since_minutes if updated_since_minutes is not None else _FULL_SNAPSHOT_MINUTES
+    payload = {"updatedSinceInMinutes": minutes}
 
     all_records = []
     seen_keys   = set()
 
     for code in facility_codes:
-        payload = {}
-        if sku_list:
-            payload["itemTypeSKUs"] = sku_list
-        if updated_since_minutes is not None:
-            payload["updatedSinceInMinutes"] = updated_since_minutes
-
         try:
             data = api_post(url, payload, facility=code)
 
