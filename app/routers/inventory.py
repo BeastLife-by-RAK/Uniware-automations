@@ -159,8 +159,8 @@ FACILITY_MAP = {
     "Emiza_B2C_WB":     "West Bengal",
 }
 
-_SKU_PAGE_SIZE   = 500   # max safe page size for itemType/search
-_INV_CHUNK_SIZE  = 500   # inventory snapshot accepts up to 10,000; keep chunks small
+_SKU_PAGE_SIZE  = 500
+_INV_CHUNK_SIZE = 500
 
 
 def fetch_facilities() -> list[str]:
@@ -168,11 +168,6 @@ def fetch_facilities() -> list[str]:
 
 
 def fetch_all_sku_codes() -> list[str]:
-    """
-    Paginate through /product/itemType/search to collect every enabled SKU code.
-    Runs once per fetch_inventory call — replaces the updatedSinceInMinutes filter
-    so SKUs at 0 stock (sold out, awaiting restock) are never silently dropped.
-    """
     url   = f"{TENANT_URL}/services/rest/v1/product/itemType/search"
     start = 0
     skus  = []
@@ -185,7 +180,7 @@ def fetch_all_sku_codes() -> list[str]:
                 "getCount":      True,
             }
         }
-        data = api_post(url, payload)   # Tenant-level — no facility header needed
+        data = api_post(url, payload)
 
         if not data.get("successful"):
             print(f"  ⚠ SKU catalog fetch failed: {data.get('message')}")
@@ -214,11 +209,6 @@ def fetch_inventory(
     url            = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
     facility_codes = fetch_facilities()
 
-    # Resolve which SKUs to query:
-    # 1. Explicit list passed by caller (e.g. from router ?skus= param)
-    # 2. Full catalog fetch — guarantees sold-out SKUs are never dropped
-    # updatedSinceInMinutes is intentionally NOT used as the sole filter anymore
-    # because it silently excludes SKUs with no inventory activity in 24hrs.
     if sku_list:
         skus = sku_list
         print(f"  Using caller-supplied SKU list ({len(skus)} SKUs)")
@@ -232,7 +222,6 @@ def fetch_inventory(
         try:
             facility_records = []
 
-            # Chunk SKUs — API hard limit is 10,000 but smaller chunks are safer
             for i in range(0, len(skus), _INV_CHUNK_SIZE):
                 chunk   = skus[i : i + _INV_CHUNK_SIZE]
                 payload = {"itemTypeSKUs": chunk}
@@ -267,4 +256,85 @@ def fetch_inventory(
 
 
 def build_inventory_excel(records: list[dict]) -> bytes:
-    # ... your existing build_inventory_excel function stays exactly the same
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Inventory Snapshot"
+
+    header_font  = Font(bold=True, color="FFFFFF", name="Arial")
+    header_fill  = PatternFill("solid", start_color="1F4E79")
+    center_align = Alignment(horizontal="center", vertical="center")
+
+    headers = [
+        "SKU Code",
+        "Facility Code",
+        "Location",
+        "Sellable Qty",
+        "Open Sale",
+        "Open Purchase",
+        "Putaway Pending",
+        "Blocked Qty",
+        "Pending Stock Transfer",
+        "Vendor Inventory",
+        "Virtual Inventory",
+        "Pending Assessment",
+        "Bad Inventory",
+        "Inventory Not Synced",
+        "Batch Recall Qty",
+    ]
+
+    for col, h in enumerate(headers, start=1):
+        cell           = ws.cell(row=1, column=col, value=h)
+        cell.font      = header_font
+        cell.fill      = header_fill
+        cell.alignment = center_align
+    ws.row_dimensions[1].height = 22
+
+    for row_idx, item in enumerate(records, start=2):
+        ws.cell(row=row_idx, column=1,  value=item.get("itemTypeSKU"))
+        ws.cell(row=row_idx, column=2,  value=item.get("facilityCode"))
+        ws.cell(row=row_idx, column=3,  value=item.get("facilityLocation"))
+        ws.cell(row=row_idx, column=4,  value=item.get("inventory", 0))
+        ws.cell(row=row_idx, column=5,  value=item.get("openSale", 0))
+        ws.cell(row=row_idx, column=6,  value=item.get("openPurchase", 0))
+        ws.cell(row=row_idx, column=7,  value=item.get("putawayPending", 0))
+        ws.cell(row=row_idx, column=8,  value=item.get("inventoryBlocked", 0))
+        ws.cell(row=row_idx, column=9,  value=item.get("pendingStockTransfer", 0))
+        ws.cell(row=row_idx, column=10, value=item.get("vendorInventory", 0))
+        ws.cell(row=row_idx, column=11, value=item.get("virtualInventory", 0))
+        ws.cell(row=row_idx, column=12, value=item.get("pendingInventoryAssessment", 0))
+        ws.cell(row=row_idx, column=13, value=item.get("badInventory", 0))
+        ws.cell(row=row_idx, column=14, value=item.get("inventoryNotSynced", 0))
+        ws.cell(row=row_idx, column=15, value=item.get("batchRecallQuantity", 0))
+
+        fill_color = "EBF3FB" if row_idx % 2 == 0 else "FFFFFF"
+        row_fill   = PatternFill("solid", start_color=fill_color)
+        for col in range(1, 16):
+            ws.cell(row=row_idx, column=col).fill = row_fill
+
+    col_widths = [16, 18, 14, 12, 10, 14, 14, 12, 22, 16, 16, 18, 14, 18, 16]
+    for col, width in enumerate(col_widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
+
+    last       = len(records) + 2
+    total_fill = PatternFill("solid", start_color="D6E4F0")
+    total_font = Font(bold=True, name="Arial")
+    ws.cell(row=last, column=1, value="TOTAL").font = total_font
+
+    numeric_cols = {
+        4: "D", 5: "E", 6: "F", 7: "G", 8: "H",
+        9: "I", 10: "J", 11: "K", 12: "L", 13: "M",
+        14: "N", 15: "O"
+    }
+    for col_num, col_letter in numeric_cols.items():
+        ws.cell(row=last, column=col_num, value=f"=SUM({col_letter}2:{col_letter}{last-1})")
+        ws.cell(row=last, column=col_num).font = total_font
+
+    for col in range(1, 16):
+        ws.cell(row=last, column=col).fill = total_fill
+
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
