@@ -212,4 +212,55 @@ def push_to_sheets(
         "tabs_created": summary,
         "total_records": len(records),
     })
+    
+@router.get("/audit")
+def audit_missing_skus():
+    """
+    Compare catalog SKUs vs inventory snapshot SKUs.
+    Returns which SKUs are missing from the inventory response.
+    """
+    from app.services.auth import api_post, TENANT_URL
 
+    # Step 1 — get ALL SKUs from catalog
+    search_url = f"{TENANT_URL}/services/rest/v1/product/itemType/search"
+    catalog_skus = set()
+    start = 0
+
+    while True:
+        payload = {
+            "searchOptions": {
+                "displayLength": 500,
+                "displayStart": start,
+                "getCount": True
+            }
+        }
+        data = api_post(search_url, payload)
+        elements = data.get("elements", [])
+        for item in elements:
+            if item.get("skuCode") and item.get("enabled", True):
+                catalog_skus.add(item["skuCode"])
+        start += len(elements)
+        if not elements or start >= data.get("totalRecords", 0):
+            break
+
+    # Step 2 — get SKUs from inventory snapshot (current method)
+    inv_url = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
+    inventory_skus = set()
+
+    for code in fetch_facilities():
+        try:
+            data = api_post(inv_url, {"updatedSinceInMinutes": 1440}, facility=code)
+            for r in data.get("inventorySnapshots") or data.get("inventorySnapShotList") or []:
+                inventory_skus.add(r.get("itemTypeSKU"))
+        except:
+            pass
+
+    # Step 3 — compare
+    missing = sorted(catalog_skus - inventory_skus)
+
+    return JSONResponse(content={
+        "catalog_total":    len(catalog_skus),
+        "inventory_total":  len(inventory_skus),
+        "missing_count":    len(missing),
+        "missing_skus":     missing,
+    })
