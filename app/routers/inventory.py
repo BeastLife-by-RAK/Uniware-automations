@@ -171,7 +171,6 @@ def fetch_all_sku_codes() -> list[str]:
     url   = f"{TENANT_URL}/services/rest/v1/product/itemType/search"
     start = 0
     skus  = []
-
     while True:
         payload = {
             "searchOptions": {
@@ -181,24 +180,16 @@ def fetch_all_sku_codes() -> list[str]:
             }
         }
         data = api_post(url, payload)
-
         if not data.get("successful"):
-            print(f"  ⚠ SKU catalog fetch failed: {data.get('message')}")
             break
-
         elements = data.get("elements", [])
         for item in elements:
             sku = item.get("skuCode")
             if sku and item.get("enabled", True):
                 skus.append(sku)
-
         start += len(elements)
-        total  = data.get("totalRecords", 0)
-
-        if not elements or start >= total:
+        if not elements or start >= data.get("totalRecords", 0):
             break
-
-    print(f"  ✔ Catalog: {len(skus)} active SKUs found")
     return skus
 
 
@@ -208,45 +199,32 @@ def fetch_inventory(
 ) -> list[dict]:
     url            = f"{TENANT_URL}/services/rest/v1/inventory/inventorySnapshot/get"
     facility_codes = fetch_facilities()
-
-    if sku_list:
-        skus = sku_list
-        print(f"  Using caller-supplied SKU list ({len(skus)} SKUs)")
-    else:
-        skus = fetch_all_sku_codes()
+    skus           = sku_list if sku_list else fetch_all_sku_codes()
 
     all_records = []
     seen_keys   = set()
 
     for code in facility_codes:
         try:
-            facility_records = []
-
             for i in range(0, len(skus), _INV_CHUNK_SIZE):
-                chunk   = skus[i : i + _INV_CHUNK_SIZE]
-                payload = {"itemTypeSKUs": chunk}
-                data    = api_post(url, payload, facility=code)
-
+                chunk = skus[i : i + _INV_CHUNK_SIZE]
+                data  = api_post(url, {"itemTypeSKUs": chunk}, facility=code)
                 if data.get("successful"):
                     records = (
                         data.get("inventorySnapshots")
                         or data.get("inventorySnapShotList")
                         or []
                     )
-                    facility_records.extend(records)
+                    for r in records:
+                        key = f"{r.get('itemTypeSKU')}_{code}"
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            r["facilityCode"]     = code
+                            r["facilityLocation"] = FACILITY_MAP.get(code, code)
+                            all_records.append(r)
+                    print(f"  ✔ Facility {code} chunk {i // _INV_CHUNK_SIZE + 1}: {len(records)} SKUs")
                 else:
-                    print(f"  ⚠ {code} chunk {i // _INV_CHUNK_SIZE + 1}: {data.get('message')}")
-
-            for r in facility_records:
-                key = f"{r.get('itemTypeSKU')}_{code}"
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    r["facilityCode"]     = code
-                    r["facilityLocation"] = FACILITY_MAP.get(code, code)
-                    all_records.append(r)
-
-            print(f"  ✔ Facility {code} ({FACILITY_MAP.get(code)}): {len(facility_records)} SKUs")
-
+                    print(f"  ⚠ Facility {code}: {data.get('message')} | errors: {data.get('errors')}")
         except Exception as e:
             print(f"  ⚠ Facility {code} failed: {e}")
             continue
@@ -323,7 +301,7 @@ def build_inventory_excel(records: list[dict]) -> bytes:
     numeric_cols = {
         4: "D", 5: "E", 6: "F", 7: "G", 8: "H",
         9: "I", 10: "J", 11: "K", 12: "L", 13: "M",
-        14: "N", 15: "O"
+        14: "N", 15: "O",
     }
     for col_num, col_letter in numeric_cols.items():
         ws.cell(row=last, column=col_num, value=f"=SUM({col_letter}2:{col_letter}{last-1})")
