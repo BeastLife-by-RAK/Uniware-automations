@@ -477,7 +477,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
 
 
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
-def process_sale_orders() -> dict:
+def process_sale_orders(dry_run: bool = False) -> dict:
     ws         = _get_sheet()
     all_values = ws.get_all_values()
 
@@ -517,7 +517,7 @@ def process_sale_orders() -> dict:
 
     orders  = _group_rows_into_orders(records)
     url     = f"{TENANT_URL}/services/rest/v1/oms/saleOrder/create"
-    results = {"success": 0, "failed": 0, "skipped": 0, "errors": []}
+    results = {"success": 0, "failed": 0, "skipped": 0, "errors": [], "dry_run_payloads": []}
 
     for order_code, order_data in orders.items():
         facility  = order_data.pop("_facility_code", "")
@@ -526,7 +526,7 @@ def process_sale_orders() -> dict:
         if not facility:
             results["skipped"] += 1
             results["errors"].append({"order_id": order_code, "error": "Missing Facility Code"})
-            if sheet_row:
+            if not dry_run and sheet_row:
                 ws.update_cell(sheet_row, status_col_idx, "SKIPPED: Missing Facility Code")
             print(f"  ⚠ Order {order_code} skipped: Missing Facility Code")
             continue
@@ -534,9 +534,18 @@ def process_sale_orders() -> dict:
         if not order_data["saleOrder"]["saleOrderItems"]:
             results["skipped"] += 1
             results["errors"].append({"order_id": order_code, "error": "No items"})
-            if sheet_row:
+            if not dry_run and sheet_row:
                 ws.update_cell(sheet_row, status_col_idx, "SKIPPED: No items")
             print(f"  ⚠ Order {order_code} skipped: No items")
+            continue
+
+        if dry_run:
+            results["dry_run_payloads"].append({
+                "order_id": order_code,
+                "facility":  facility,
+                "payload":   order_data,
+            })
+            print(f"  [DRY RUN] Order {order_code} → facility={facility}, items={len(order_data['saleOrder']['saleOrderItems'])}")
             continue
 
         try:
