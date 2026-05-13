@@ -435,17 +435,12 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
         sku      = _s(row, "Item SKU Code*")
         quantity = _i(row, "Quantity", 1)
 
-        # Auto-generate unique item code if blank or already used
-        raw_item_code = _s(row, "Sale Order Item Code*")
-        if not raw_item_code or raw_item_code in used_item_codes:
-            item_code = f"{order_code}-{sku}"
-            # if even this is taken (same SKU twice in same order) append index
-            idx = 1
-            while item_code in used_item_codes:
-                item_code = f"{order_code}-{sku}-{idx}"
-                idx += 1
-        else:
-            item_code = raw_item_code
+        # Always generate item code as {order_code}-{sku} — guaranteed globally unique
+        item_code = f"{order_code}-{sku}"
+        idx = 1
+        while item_code in used_item_codes:
+            item_code = f"{order_code}-{sku}-{idx}"
+            idx += 1
         used_item_codes.add(item_code)
 
         item: dict = {
