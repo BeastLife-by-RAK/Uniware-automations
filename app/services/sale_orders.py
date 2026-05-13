@@ -255,5 +255,9 @@ def process_sale_orders() -> dict:
             results["failed"] += 1
             results["errors"].append({"order_id": order_code, "error": str(e)})
             print(f"  ✗ Order {order_code} exception: {e}")
+    #FOR TESTING PURPOSE 
+    print(f"SUMMARY → total in sheet: {len(orders)}, success: {results['success']}, failed: {results['failed']}, skipped: {results['skipped']}")
+    print(f"SKIPPED → {results['errors']}")
+    return results
 
     return results
