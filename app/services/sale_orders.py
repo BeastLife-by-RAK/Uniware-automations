@@ -259,5 +259,3 @@ def process_sale_orders() -> dict:
     print(f"SUMMARY → total in sheet: {len(orders)}, success: {results['success']}, failed: {results['failed']}, skipped: {results['skipped']}")
     print(f"SKIPPED → {results['errors']}")
     return results
-
-    return results
