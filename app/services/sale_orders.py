@@ -427,9 +427,12 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
 
             orders[order_code] = {
                 "_facility_code": _s(row, "Facility Code"),
-                "_sheet_row":     raw_row.get("_sheet_row"),
+                "_sheet_rows":    [raw_row.get("_sheet_row")],
                 "saleOrder":      sale_order,
             }
+        else:
+            if raw_row.get("_sheet_row"):
+                orders[order_code]["_sheet_rows"].append(raw_row.get("_sheet_row"))
 
         # ── Build item ────────────────────────────────────────────────────
         sku      = _s(row, "Item SKU Code*")
@@ -515,23 +518,41 @@ def process_sale_orders(dry_run: bool = False) -> dict:
     results = {"success": 0, "failed": 0, "skipped": 0, "errors": [], "dry_run_payloads": []}
 
     for order_code, order_data in orders.items():
-        facility  = order_data.pop("_facility_code", "")
-        sheet_row = order_data.pop("_sheet_row", None)
+        facility    = order_data.pop("_facility_code", "")
+        sheet_rows  = order_data.pop("_sheet_rows", [])
+        first_row   = sheet_rows[0] if sheet_rows else None
+
+        def _write_status(status: str, all_rows: bool = False):
+            if dry_run:
+                return
+            targets = sheet_rows if all_rows else ([first_row] if first_row else [])
+            for sr in targets:
+                if sr:
+                    ws.update_cell(sr, status_col_idx, status)
 
         if not facility:
             results["skipped"] += 1
             results["errors"].append({"order_id": order_code, "error": "Missing Facility Code"})
-            if not dry_run and sheet_row:
-                ws.update_cell(sheet_row, status_col_idx, "SKIPPED: Missing Facility Code")
+            _write_status("SKIPPED: Missing Facility Code")
             print(f"  ⚠ Order {order_code} skipped: Missing Facility Code")
             continue
 
         if not order_data["saleOrder"]["saleOrderItems"]:
             results["skipped"] += 1
             results["errors"].append({"order_id": order_code, "error": "No items"})
-            if not dry_run and sheet_row:
-                ws.update_cell(sheet_row, status_col_idx, "SKIPPED: No items")
+            _write_status("SKIPPED: No items")
             print(f"  ⚠ Order {order_code} skipped: No items")
+            continue
+
+        # Validate required address fields before hitting Unicommerce
+        addr = order_data["saleOrder"]["addresses"][0]
+        missing = [f for f in ("name", "addressLine1", "city") if not addr.get(f)]
+        if missing:
+            msg = f"Missing required fields: {', '.join(missing)}"
+            results["skipped"] += 1
+            results["errors"].append({"order_id": order_code, "error": msg})
+            _write_status(f"SKIPPED: {msg}")
+            print(f"  ⚠ Order {order_code} skipped: {msg}")
             continue
 
         if dry_run:
@@ -549,23 +570,20 @@ def process_sale_orders(dry_run: bool = False) -> dict:
             if data.get("successful"):
                 uc_code = data.get("saleOrderDetailDTO", {}).get("code", order_code)
                 results["success"] += 1
-                if sheet_row:
-                    ws.update_cell(sheet_row, status_col_idx, "SUCCESS")
+                _write_status("SUCCESS", all_rows=True)
                 print(f"  ✔ Order {order_code} → {uc_code}")
             else:
                 errors = data.get("errors", [])
                 msg    = errors[0].get("description") if errors else data.get("message", "Unknown error")
                 results["failed"] += 1
                 results["errors"].append({"order_id": order_code, "error": msg})
-                if sheet_row:
-                    ws.update_cell(sheet_row, status_col_idx, f"FAILED: {msg}")
+                _write_status(f"FAILED: {msg}")
                 print(f"  ✗ Order {order_code} failed: {msg}")
 
         except Exception as e:
             results["failed"] += 1
             results["errors"].append({"order_id": order_code, "error": str(e)})
-            if sheet_row:
-                ws.update_cell(sheet_row, status_col_idx, f"ERROR: {str(e)}")
+            _write_status(f"ERROR: {str(e)}")
             print(f"  ✗ Order {order_code} exception: {e}")
 
     print(f"SUMMARY → total: {len(orders)}, success: {results['success']}, failed: {results['failed']}, skipped: {results['skipped']}")
