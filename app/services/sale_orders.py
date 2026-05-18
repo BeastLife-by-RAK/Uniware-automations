@@ -429,6 +429,8 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
 
         # ── Build item ────────────────────────────────────────────────────────
         sku      = _s(row, "Item SKU Code*")
+        if not sku:
+            continue
         quantity = _i(row, "Quantity", 1)
 
         item_code = f"{order_code}-{sku}"
@@ -576,4 +578,5 @@ def process_sale_orders(dry_run: bool = False) -> dict:
 
     print(f"SUMMARY → total: {len(orders)}, success: {results['success']}, failed: {results['failed']}, skipped: {results['skipped']}")
     return results
+
 
