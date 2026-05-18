@@ -350,7 +350,6 @@ def _parse_date(raw: str) -> str | None:
 # ── GROUP ROWS INTO ORDERS ────────────────────────────────────────────────────
 def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
     orders: dict[str, dict] = {}
-    # track used item codes globally to prevent duplicates across orders
     used_item_codes: set[str] = set()
 
     for raw_row in records:
@@ -438,7 +437,6 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
         sku      = _s(row, "Item SKU Code*")
         quantity = _i(row, "Quantity", 1)
 
-        # Always generate item code as {order_code}-{sku} — guaranteed globally unique
         item_code = f"{order_code}-{sku}"
         idx = 1
         while item_code in used_item_codes:
@@ -476,10 +474,16 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
 
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
 def process_sale_orders(dry_run: bool = False) -> dict:
+    # ── Startup config check ──────────────────────────────────────────────────
+    print(f"[CONFIG] SPREADSHEET_ID={'SET' if SPREADSHEET_ID else 'MISSING'} | SHEET_TAB={SHEET_TAB} | CREDENTIALS={'SET' if CREDENTIALS_JSON else 'MISSING'}")
+    from app.services.auth import TENANT_URL as _TU, USERNAME as _UN
+    print(f"[CONFIG] TENANT_URL={'SET' if _TU else 'MISSING'} | USERNAME={'SET' if _UN else 'MISSING'}")
+
     ws         = _get_sheet()
     all_values = ws.get_all_values()
 
     if not all_values or len(all_values) < 2:
+        print("[CONFIG] Sheet is empty or has no data rows — nothing to process")
         return {"success": 0, "failed": 0, "skipped": 0, "errors": []}
 
     raw_headers = all_values[0]
@@ -505,22 +509,40 @@ def process_sale_orders(dry_run: bool = False) -> dict:
 
     # Build records — skip SUCCESS rows, tag each with sheet row number
     records = []
+    skipped_success = 0
     for i, row_values in enumerate(all_values[1:], start=2):
         padded   = row_values + [""] * (len(headers) - len(row_values))
         row_dict = dict(zip(headers, padded))
         if row_dict.get(_STATUS_COL, "").strip().upper() == "SUCCESS":
+            skipped_success += 1
             continue
         row_dict["_sheet_row"] = i
         records.append(row_dict)
 
-    orders  = _group_rows_into_orders(records)
+    print(f"SHEET SCAN → total rows: {len(all_values)-1}, already SUCCESS: {skipped_success}, to process: {len(records)}")
+
+    orders = _group_rows_into_orders(records)
+
+    # Warn about orders where some rows are SUCCESS and some are not (partial resubmit risk)
+    success_order_codes: set[str] = set()
+    for row_values in all_values[1:]:
+        padded   = row_values + [""] * (len(headers) - len(row_values))
+        row_dict = dict(zip(headers, padded))
+        if row_dict.get(_STATUS_COL, "").strip().upper() == "SUCCESS":
+            code = str(row_dict.get("Sales Order Code*", "")).strip()
+            if code:
+                success_order_codes.add(code)
+    for order_code in orders:
+        if order_code in success_order_codes:
+            print(f"  ⚠ PARTIAL RESUBMIT RISK: {order_code} has some SUCCESS rows already — may get DUPLICATE from Unicommerce")
+
     url     = f"{TENANT_URL}/services/rest/v1/oms/saleOrder/create"
     results = {"success": 0, "failed": 0, "skipped": 0, "errors": [], "dry_run_payloads": []}
 
     for order_code, order_data in orders.items():
-        facility    = order_data.pop("_facility_code", "")
-        sheet_rows  = order_data.pop("_sheet_rows", [])
-        first_row   = sheet_rows[0] if sheet_rows else None
+        facility   = order_data.pop("_facility_code", "")
+        sheet_rows = order_data.pop("_sheet_rows", [])
+        first_row  = sheet_rows[0] if sheet_rows else None
 
         def _write_status(status: str, all_rows: bool = False):
             if dry_run:
@@ -528,31 +550,38 @@ def process_sale_orders(dry_run: bool = False) -> dict:
             targets = sheet_rows if all_rows else ([first_row] if first_row else [])
             for sr in targets:
                 if sr:
-                    ws.update_cell(sr, status_col_idx, status)
+                    try:
+                        ws.update_cell(sr, status_col_idx, status)
+                    except Exception as write_err:
+                        print(f"  ⚠ Could not write status '{status}' to row {sr}: {write_err}")
+
+        customer = order_data["saleOrder"].get("customerName", "?")
+        n_items  = len(order_data["saleOrder"]["saleOrderItems"])
+        print(f"  → Processing {order_code} | customer={customer} | facility={facility or 'MISSING'} | items={n_items}")
 
         if not facility:
             results["skipped"] += 1
             results["errors"].append({"order_id": order_code, "error": "Missing Facility Code"})
             _write_status("SKIPPED: Missing Facility Code")
-            print(f"  ⚠ Order {order_code} skipped: Missing Facility Code")
+            print(f"  ⚠ [PYTHON] Order {order_code} skipped: Missing Facility Code")
             continue
 
         if not order_data["saleOrder"]["saleOrderItems"]:
             results["skipped"] += 1
             results["errors"].append({"order_id": order_code, "error": "No items"})
             _write_status("SKIPPED: No items")
-            print(f"  ⚠ Order {order_code} skipped: No items")
+            print(f"  ⚠ [PYTHON] Order {order_code} skipped: No items")
             continue
 
         # Validate required address fields before hitting Unicommerce
-        addr = order_data["saleOrder"]["addresses"][0]
+        addr    = order_data["saleOrder"]["addresses"][0]
         missing = [f for f in ("name", "addressLine1", "city") if not addr.get(f)]
         if missing:
             msg = f"Missing required fields: {', '.join(missing)}"
             results["skipped"] += 1
             results["errors"].append({"order_id": order_code, "error": msg})
             _write_status(f"SKIPPED: {msg}")
-            print(f"  ⚠ Order {order_code} skipped: {msg}")
+            print(f"  ⚠ [PYTHON] Order {order_code} skipped: {msg}")
             continue
 
         if dry_run:
@@ -561,7 +590,7 @@ def process_sale_orders(dry_run: bool = False) -> dict:
                 "facility":  facility,
                 "payload":   order_data,
             })
-            print(f"  [DRY RUN] Order {order_code} → facility={facility}, items={len(order_data['saleOrder']['saleOrderItems'])}")
+            print(f"  [DRY RUN] Order {order_code} → facility={facility}, items={n_items}")
             continue
 
         try:
@@ -571,20 +600,30 @@ def process_sale_orders(dry_run: bool = False) -> dict:
                 uc_code = data.get("saleOrderDetailDTO", {}).get("code", order_code)
                 results["success"] += 1
                 _write_status("SUCCESS", all_rows=True)
-                print(f"  ✔ Order {order_code} → {uc_code}")
+                print(f"  ✔ [UNICOMMERCE] Order {order_code} accepted → {uc_code}")
             else:
                 errors = data.get("errors", [])
                 msg    = errors[0].get("description") if errors else data.get("message", "Unknown error")
                 results["failed"] += 1
                 results["errors"].append({"order_id": order_code, "error": msg})
                 _write_status(f"FAILED: {msg}")
-                print(f"  ✗ Order {order_code} failed: {msg}")
+                print(f"  ✗ [UNICOMMERCE] Order {order_code} rejected: {msg}")
 
         except Exception as e:
+            err_str = str(e)
             results["failed"] += 1
-            results["errors"].append({"order_id": order_code, "error": str(e)})
-            _write_status(f"ERROR: {str(e)}")
-            print(f"  ✗ Order {order_code} exception: {e}")
+            results["errors"].append({"order_id": order_code, "error": err_str})
+            _write_status(f"ERROR: {err_str}")
+            if "HTTP 401" in err_str:
+                print(f"  ✗ [AUTH] Order {order_code} — token rejected/expired: {err_str}")
+            elif "HTTP 5" in err_str:
+                print(f"  ✗ [UNICOMMERCE-SERVER] Order {order_code} — Unicommerce 5xx error: {err_str}")
+            elif "HTTP 4" in err_str:
+                print(f"  ✗ [UNICOMMERCE-CLIENT] Order {order_code} — bad request: {err_str}")
+            elif "timeout" in err_str.lower() or "timed out" in err_str.lower():
+                print(f"  ✗ [NETWORK] Order {order_code} — request timed out: {err_str}")
+            else:
+                print(f"  ✗ [PYTHON] Order {order_code} — unexpected exception: {err_str}")
 
     print(f"SUMMARY → total: {len(orders)}, success: {results['success']}, failed: {results['failed']}, skipped: {results['skipped']}")
     return results
