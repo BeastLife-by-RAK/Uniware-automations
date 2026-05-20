@@ -428,42 +428,51 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
             }
 
         # ── Build item ────────────────────────────────────────────────────────
-        sku      = _s(row, "Item SKU Code*")
+        sku           = _s(row, "Item SKU Code*")
         if not sku:
             continue
-        quantity = _i(row, "Quantity", 1)
+        quantity      = max(1, _i(row, "Quantity", 1))
+        selling_price = _f(row, "Selling Price")
+        gift_wrap     = _b(row, "Gift Wrap")
+        gift_message  = _s(row, "Gift Message")
+        voucher_code  = _s(row, "Voucher Code")
+        voucher_val   = _f(row, "Voucher Value") if voucher_code else None
 
-        item_code = f"{order_code}-{sku}"
-        idx = 1
-        while item_code in used_item_codes:
-            item_code = f"{order_code}-{sku}-{idx}"
-            idx += 1
-        used_item_codes.add(item_code)
+        if quantity > 1:
+            print(f"    [QTY] {order_code} → SKU={sku} qty={quantity} (expanding into {quantity} separate items @ {selling_price} each)")
 
-        item: dict = {
-            "code":               item_code,
-            "itemSku":            sku,
-            "shippingMethodCode": "STD",
-            "facilityCode":       "",
-            "channelProductId":   sku,
-            "packetNumber":       1,
-            "giftWrap":           _b(row, "Gift Wrap"),
-            "quantity":           quantity,
-            "totalPrice":         _f(row, "Selling Price"),
-            "sellingPrice":       _f(row, "Selling Price"),
-            "prepaidAmount":      _f(row, "Prepaid Amount"),
-            "discount":           _f(row, "Discount"),
-            "shippingCharges":    _f(row, "Shipping Charges"),
-            "storeCredit":        _f(row, "Store Credit"),
-            "giftWrapCharges":    _f(row, "Gift Wrap Charges"),
-        }
+        # Unicommerce Sale Order API has no quantity field — each item object = 1 unit
+        for _ in range(quantity):
+            item_code = f"{order_code}-{sku}"
+            idx = 1
+            while item_code in used_item_codes:
+                item_code = f"{order_code}-{sku}-{idx}"
+                idx += 1
+            used_item_codes.add(item_code)
 
-        _opt(item, "giftMessage", _s(row, "Gift Message"))
-        _opt(item, "voucherCode", _s(row, "Voucher Code"))
-        if _s(row, "Voucher Code"):
-            item["voucherValue"] = _f(row, "Voucher Value")
+            item: dict = {
+                "code":               item_code,
+                "itemSku":            sku,
+                "shippingMethodCode": "STD",
+                "facilityCode":       "",
+                "channelProductId":   sku,
+                "packetNumber":       1,
+                "giftWrap":           gift_wrap,
+                "quantity":           1,
+                "totalPrice":         selling_price,
+                "sellingPrice":       selling_price,
+                "prepaidAmount":      _f(row, "Prepaid Amount"),
+                "discount":           _f(row, "Discount"),
+                "shippingCharges":    _f(row, "Shipping Charges"),
+                "storeCredit":        _f(row, "Store Credit"),
+                "giftWrapCharges":    _f(row, "Gift Wrap Charges"),
+            }
+            _opt(item, "giftMessage", gift_message)
+            _opt(item, "voucherCode", voucher_code)
+            if voucher_val is not None:
+                item["voucherValue"] = voucher_val
 
-        orders[order_code]["saleOrder"]["saleOrderItems"].append(item)
+            orders[order_code]["saleOrder"]["saleOrderItems"].append(item)
 
     return orders
 
