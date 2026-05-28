@@ -264,6 +264,331 @@
 
 
 #NEW CODE 
+# import os
+# import json
+# from datetime import datetime
+
+# import gspread
+# from google.oauth2.service_account import Credentials
+
+# from app.services.auth import api_post, TENANT_URL
+
+# # ── SHEET CONFIG ──────────────────────────────────────────────────────────────
+# SPREADSHEET_ID   = os.getenv("INFLUENCER_SHEET_ID")
+# SHEET_TAB        = os.getenv("INFLUENCER_SHEET_TAB", "Sheet1")
+# CREDENTIALS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+
+# SCOPES = [
+#     "https://www.googleapis.com/auth/spreadsheets",
+#     "https://www.googleapis.com/auth/drive",
+# ]
+
+
+# # ── GOOGLE SHEETS CLIENT ──────────────────────────────────────────────────────
+# def _get_sheet():
+#     creds_dict = json.loads(CREDENTIALS_JSON)
+#     creds      = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+#     client     = gspread.authorize(creds)
+#     return client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_TAB)
+
+
+# # ── HELPERS ───────────────────────────────────────────────────────────────────
+# def _s(row: dict, key: str, default: str = "") -> str:
+#     return str(row.get(key) or default).strip()
+
+
+# def _f(row: dict, key: str) -> float:
+#     try:
+#         return float(row.get(key) or 0)
+#     except (ValueError, TypeError):
+#         return 0.0
+
+
+# def _i(row: dict, key: str, default: int = 0) -> int:
+#     try:
+#         return int(float(row.get(key) or default))
+#     except (ValueError, TypeError):
+#         return default
+
+
+# def _b(row: dict, key: str, default: bool = False) -> bool:
+#     val = _s(row, key).upper()
+#     if val in ("TRUE", "1", "YES"):
+#         return True
+#     if val in ("FALSE", "0", "NO"):
+#         return False
+#     return default
+
+
+# def _opt(d: dict, key: str, value) -> None:
+#     if value is not None and value != "":
+#         d[key] = value
+
+
+# def _parse_date(raw: str) -> str | None:
+#     if not raw:
+#         return None
+#     raw = raw.strip()
+#     for fmt in (
+#         "%d/%m/%Y %H:%M:%S",
+#         "%d/%m/%Y %H:%M",
+#         "%d/%m/%Y",
+#         "%d-%m-%Y %H:%M:%S",
+#         "%Y-%m-%dT%H:%M:%S",
+#         "%Y-%m-%d %H:%M:%S",
+#         "%Y-%m-%d",
+#     ):
+#         try:
+#             return datetime.strptime(raw, fmt).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+#         except ValueError:
+#             continue
+#     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+# # ── GROUP ROWS INTO ORDERS ────────────────────────────────────────────────────
+# def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
+#     orders: dict[str, dict] = {}
+#     used_item_codes: set[str] = set()
+
+#     for raw_row in records:
+#         row = {k: str(v).strip() if v is not None else "" for k, v in raw_row.items()}
+
+#         order_code = row.get("Sales Order Code*", "")
+#         if not order_code:
+#             continue
+
+#         if order_code not in orders:
+#             addr_id = "1"
+
+#             ship_addr: dict = {
+#                 "id":           addr_id,
+#                 "name":         _s(row, "Shipping Address Name"),
+#                 "addressLine1": _s(row, "Shipping Address Line 1"),
+#                 "city":         _s(row, "Shipping Address City"),
+#                 "state":        _s(row, "Shipping Address State"),
+#                 "country":      _s(row, "Shipping Address Country") or "India",
+#                 "pincode":      _s(row, "Shipping Address Pincode"),
+#                 "phone":        _s(row, "Shipping Address Phone"),
+#             }
+#             _opt(ship_addr, "addressLine2", _s(row, "Shipping Address Line 2"))
+#             _opt(ship_addr, "latitude",     _s(row, "Shipping Address Latitude"))
+#             _opt(ship_addr, "longitude",    _s(row, "Shipping Address Longitude"))
+
+#             sale_order: dict = {
+#                 "code":                       order_code,
+#                 "displayOrderCode":           _s(row, "Display Sales Order Code") or order_code,
+#                 "channel":                    "INFLUENCERS_MARKETING",
+#                 "cashOnDelivery":             False,
+#                 "customerName":               ship_addr["name"],
+#                 "notificationMobile":         _s(row, "Notification Mobile") or ship_addr["phone"],
+#                 "currencyCode":               _s(row, "Currency Code") or "INR",
+#                 "totalPrepaidAmount":         _f(row, "Prepaid Amount"),
+#                 "totalCashOnDeliveryCharges": 0,
+#                 "totalDiscount":              _f(row, "Discount"),
+#                 "totalShippingCharges":       _f(row, "Order Total Shipping Charges"),
+#                 "totalGiftWrapCharges":       _f(row, "Gift Wrap Charges"),
+#                 "totalStoreCredit":           _f(row, "Store Credit"),
+#                 "addresses":                  [ship_addr],
+#                 "shippingAddress":            {"referenceId": addr_id},
+#                 "billingAddress":             {"referenceId": addr_id},
+#                 "saleOrderItems":             [],
+#             }
+
+#             _opt(sale_order, "displayOrderDateTime",  _parse_date(_s(row, "Order Date as dd/mm/yyyy hh:MM:ss")))
+#             _opt(sale_order, "channelProcessingTime", _parse_date(
+#                 _s(row, "Channel Order Processing Date as dd/MM/yyyy hh:mm:ss")
+#                 or _s(row, "Channel Order Processing Date as dd/MM/yyyy hh:mm:ss_1")
+#             ))
+#             _opt(sale_order, "fulfillmentTat",          _parse_date(_s(row, "Fulfillment Tat")))
+#             _opt(sale_order, "customerCode",            _s(row, "Customer Code"))
+#             _opt(sale_order, "customerGSTIN",           _s(row, "Customer GSTIN"))
+#             _opt(sale_order, "priority",                _i(row, "Priority") or None)
+#             _opt(sale_order, "shippingPackageTypeCode", _s(row, "Shipping Package Type Code"))
+#             _opt(sale_order, "parentSaleOrderCode",     _s(row, "Parent Sale Order Code"))
+
+#             tracking = _s(row, "Tracking Number")
+#             if tracking:
+#                 sale_order["shippingProviders"] = [{
+#                     "code":           "Shiprocket1",
+#                     "packetNumber":   1,
+#                     "trackingNumber": tracking,
+#                 }]
+
+#             combo_id   = _s(row, "Combination Identifier")
+#             combo_desc = _s(row, "Combination Description")
+#             if combo_id and combo_desc:
+#                 sale_order["saleOrderItemCombinations"] = [{
+#                     "combinationIdentifier":  combo_id,
+#                     "combinationDescription": combo_desc,
+#                 }]
+
+#             orders[order_code] = {
+#                 "_facility_code": _s(row, "Facility Code"),
+#                 "saleOrder":      sale_order,
+#             }
+
+#         # ── Build item ────────────────────────────────────────────────────────
+#         sku           = _s(row, "Item SKU Code*")
+#         if not sku:
+#             continue
+#         quantity      = max(1, _i(row, "Quantity", 1))
+#         selling_price = _f(row, "Selling Price")
+#         gift_wrap     = _b(row, "Gift Wrap")
+#         gift_message  = _s(row, "Gift Message")
+#         voucher_code  = _s(row, "Voucher Code")
+#         voucher_val   = _f(row, "Voucher Value") if voucher_code else None
+
+#         if quantity > 1:
+#             print(f"    [QTY] {order_code} → SKU={sku} qty={quantity} (expanding into {quantity} separate items @ {selling_price} each)")
+
+#         # Unicommerce Sale Order API has no quantity field — each item object = 1 unit
+#         for _ in range(quantity):
+#             item_code = f"{order_code}-{sku}"
+#             idx = 1
+#             while item_code in used_item_codes:
+#                 item_code = f"{order_code}-{sku}-{idx}"
+#                 idx += 1
+#             used_item_codes.add(item_code)
+
+#             item: dict = {
+#                 "code":               item_code,
+#                 "itemSku":            sku,
+#                 "shippingMethodCode": "STD",
+#                 "facilityCode":       "",
+#                 "channelProductId":   sku,
+#                 "packetNumber":       1,
+#                 "giftWrap":           gift_wrap,
+#                 "quantity":           1,
+#                 "totalPrice":         selling_price,
+#                 "sellingPrice":       selling_price,
+#                 "prepaidAmount":      _f(row, "Prepaid Amount"),
+#                 "discount":           _f(row, "Discount"),
+#                 "shippingCharges":    _f(row, "Shipping Charges"),
+#                 "storeCredit":        _f(row, "Store Credit"),
+#                 "giftWrapCharges":    _f(row, "Gift Wrap Charges"),
+#             }
+#             _opt(item, "giftMessage", gift_message)
+#             _opt(item, "voucherCode", voucher_code)
+#             if voucher_val is not None:
+#                 item["voucherValue"] = voucher_val
+
+#             orders[order_code]["saleOrder"]["saleOrderItems"].append(item)
+
+#     return orders
+
+
+# # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
+# def process_sale_orders(dry_run: bool = False) -> dict:
+#     print(f"[CONFIG] SPREADSHEET_ID={'SET' if SPREADSHEET_ID else 'MISSING'} | SHEET_TAB={SHEET_TAB} | CREDENTIALS={'SET' if CREDENTIALS_JSON else 'MISSING'}")
+#     from app.services.auth import TENANT_URL as _TU, USERNAME as _UN
+#     print(f"[CONFIG] TENANT_URL={'SET' if _TU else 'MISSING'} | USERNAME={'SET' if _UN else 'MISSING'}")
+
+#     ws         = _get_sheet()
+#     all_values = ws.get_all_values()
+
+#     if not all_values or len(all_values) < 2:
+#         print("[CONFIG] Sheet is empty or has no data rows — nothing to process")
+#         return {"success": 0, "failed": 0, "skipped": 0, "errors": []}
+
+#     raw_headers = all_values[0]
+
+#     # De-duplicate headers
+#     seen    = {}
+#     headers = []
+#     for h in raw_headers:
+#         if h in seen:
+#             seen[h] += 1
+#             headers.append(f"{h}_{seen[h]}")
+#         else:
+#             seen[h] = 0
+#             headers.append(h)
+
+#     records = []
+#     for row_values in all_values[1:]:
+#         padded = row_values + [""] * (len(headers) - len(row_values))
+#         records.append(dict(zip(headers, padded)))
+
+#     print(f"SHEET SCAN → total rows: {len(records)}")
+
+#     orders  = _group_rows_into_orders(records)
+#     url     = f"{TENANT_URL}/services/rest/v1/oms/saleOrder/create"
+#     results = {"success": 0, "failed": 0, "skipped": 0, "errors": [], "dry_run_payloads": []}
+
+#     for order_code, order_data in orders.items():
+#         facility = order_data.pop("_facility_code", "")
+#         customer = order_data["saleOrder"].get("customerName", "?")
+#         n_items  = len(order_data["saleOrder"]["saleOrderItems"])
+#         print(f"  → Processing {order_code} | customer={customer} | facility={facility or 'MISSING'} | items={n_items}")
+
+#         if not facility:
+#             results["skipped"] += 1
+#             results["errors"].append({"order_id": order_code, "error": "Missing Facility Code"})
+#             print(f"  ⚠ [PYTHON] Order {order_code} skipped: Missing Facility Code")
+#             continue
+
+#         if not order_data["saleOrder"]["saleOrderItems"]:
+#             results["skipped"] += 1
+#             results["errors"].append({"order_id": order_code, "error": "No items"})
+#             print(f"  ⚠ [PYTHON] Order {order_code} skipped: No items")
+#             continue
+
+#         addr    = order_data["saleOrder"]["addresses"][0]
+#         missing = [f for f in ("name", "addressLine1", "city") if not addr.get(f)]
+#         if missing:
+#             msg = f"Missing required fields: {', '.join(missing)}"
+#             results["skipped"] += 1
+#             results["errors"].append({"order_id": order_code, "error": msg})
+#             print(f"  ⚠ [PYTHON] Order {order_code} skipped: {msg}")
+#             continue
+
+#         if dry_run:
+#             results["dry_run_payloads"].append({
+#                 "order_id": order_code,
+#                 "facility":  facility,
+#                 "payload":   order_data,
+#             })
+#             print(f"  [DRY RUN] Order {order_code} → facility={facility}, items={n_items}")
+#             continue
+
+#         try:
+#             data = api_post(url, order_data, facility=facility)
+
+#             if data.get("successful"):
+#                 uc_code = data.get("saleOrderDetailDTO", {}).get("code", order_code)
+#                 results["success"] += 1
+#                 print(f"  ✔ [UNICOMMERCE] Order {order_code} accepted → {uc_code}")
+#             else:
+#                 errors = data.get("errors", [])
+#                 msg    = errors[0].get("description") if errors else data.get("message", "Unknown error")
+
+#                 # Unicommerce rejects duplicate orders — treat as already done, not a failure
+#                 if "duplicate" in str(msg).lower() or "already exist" in str(msg).lower():
+#                     results["success"] += 1
+#                     print(f"  ✔ [UNICOMMERCE] Order {order_code} already exists in Unicommerce — skipping")
+#                 else:
+#                     results["failed"] += 1
+#                     results["errors"].append({"order_id": order_code, "error": msg})
+#                     print(f"  ✗ [UNICOMMERCE] Order {order_code} rejected: {msg}")
+
+#         except Exception as e:
+#             err_str = str(e)
+#             results["failed"] += 1
+#             results["errors"].append({"order_id": order_code, "error": err_str})
+#             if "HTTP 401" in err_str:
+#                 print(f"  ✗ [AUTH] Order {order_code} — token rejected/expired: {err_str}")
+#             elif "HTTP 5" in err_str:
+#                 print(f"  ✗ [UNICOMMERCE-SERVER] Order {order_code} — server error: {err_str}")
+#             elif "HTTP 4" in err_str:
+#                 print(f"  ✗ [UNICOMMERCE-CLIENT] Order {order_code} — bad request: {err_str}")
+#             elif "timeout" in err_str.lower() or "timed out" in err_str.lower():
+#                 print(f"  ✗ [NETWORK] Order {order_code} — request timed out: {err_str}")
+#             else:
+#                 print(f"  ✗ [PYTHON] Order {order_code} — unexpected exception: {err_str}")
+
+#     print(f"SUMMARY → total: {len(orders)}, success: {results['success']}, failed: {results['failed']}, skipped: {results['skipped']}")
+#     return results
+
+#NEW CODE 1
 import os
 import json
 from datetime import datetime
@@ -277,11 +602,18 @@ from app.services.auth import api_post, TENANT_URL
 SPREADSHEET_ID   = os.getenv("INFLUENCER_SHEET_ID")
 SHEET_TAB        = os.getenv("INFLUENCER_SHEET_TAB", "Sheet1")
 CREDENTIALS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+MAIN_SHEET_ID    = os.getenv("MAIN_SHEET_ID", "")   # main sheet for order-ID writeback
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
+# IM Orders column indices (0-based)
+_IM_DATE_COL     = 0   # A
+_IM_MOBILE_COL   = 2   # C
+_IM_SKU_COL      = 9   # J
+_IM_ORDER_ID_COL = 15  # P  ← only column we write to
 
 
 # ── GOOGLE SHEETS CLIENT ──────────────────────────────────────────────────────
@@ -290,6 +622,61 @@ def _get_sheet():
     creds      = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client     = gspread.authorize(creds)
     return client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_TAB)
+
+
+# ── WRITE ORDER IDs BACK TO IM ORDERS ─────────────────────────────────────────
+def _write_order_ids_back(placed: dict) -> None:
+    """
+    Write Unicommerce INF codes to Order ID column (P) in IM Orders.
+    Matches rows by date + mobile + sku. Only updates blank Order ID cells.
+    Never touches any other column. Errors are logged, never raised.
+
+    placed = {"INF2017": {"mobile": "9310986991", "skus": {"BL003"}, "date": "28-05-2026"}}
+    """
+    if not placed or not MAIN_SHEET_ID:
+        if not MAIN_SHEET_ID:
+            print("[WRITEBACK] MAIN_SHEET_ID not set — skipping")
+        return
+    try:
+        creds  = Credentials.from_service_account_info(json.loads(CREDENTIALS_JSON), scopes=SCOPES)
+        ws     = gspread.authorize(creds).open_by_key(MAIN_SHEET_ID).worksheet("IM Orders")
+        rows   = ws.get_all_values()
+
+        # Find header row (first row where col A = "Date")
+        header_idx = next((i for i, r in enumerate(rows) if r[0].strip().lower() == "date"), None)
+        if header_idx is None:
+            print("[WRITEBACK] Header row not found in IM Orders — aborting")
+            return
+
+        # Build lookup: (date, mobile, sku) → inf_code
+        lookup = {
+            (info["date"], info["mobile"], sku): code
+            for code, info in placed.items()
+            for sku in info["skus"]
+        }
+
+        updates: list[gspread.Cell] = []
+        for offset, row in enumerate(rows[header_idx + 1:]):
+            date     = row[_IM_DATE_COL].strip()     if len(row) > _IM_DATE_COL     else ""
+            mobile   = row[_IM_MOBILE_COL].strip()   if len(row) > _IM_MOBILE_COL   else ""
+            sku      = row[_IM_SKU_COL].strip()      if len(row) > _IM_SKU_COL      else ""
+            order_id = row[_IM_ORDER_ID_COL].strip() if len(row) > _IM_ORDER_ID_COL else ""
+
+            if not mobile or not sku or order_id:
+                continue  # skip empty rows or already-written rows
+
+            code = lookup.get((date, mobile, sku))
+            if code:
+                sheet_row = header_idx + offset + 2  # 1-based sheet row
+                updates.append(gspread.Cell(row=sheet_row, col=_IM_ORDER_ID_COL + 1, value=code))
+
+        if updates:
+            ws.update_cells(updates, value_input_option="USER_ENTERED")
+            print(f"[WRITEBACK] ✔ Wrote order IDs to {len(updates)} IM Orders rows")
+        else:
+            print("[WRITEBACK] No rows to update")
+    except Exception as e:
+        print(f"[WRITEBACK] ✗ Error (non-fatal): {e}")
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -477,6 +864,20 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
     return orders
 
 
+# ── TRACK SUCCESSFULLY PLACED ORDERS ─────────────────────────────────────────
+def _track_placed(placed: dict, order_code: str, order_data: dict) -> None:
+    so     = order_data["saleOrder"]
+    mobile = so["addresses"][0].get("phone", "") if so.get("addresses") else ""
+    skus   = {item["itemSku"] for item in so.get("saleOrderItems", [])}
+    raw_date = so.get("displayOrderDateTime", "")
+    try:
+        date = datetime.strptime(raw_date[:10], "%Y-%m-%d").strftime("%d-%m-%Y") if raw_date else \
+               datetime.now().strftime("%d-%m-%Y")
+    except ValueError:
+        date = datetime.now().strftime("%d-%m-%Y")
+    placed[order_code] = {"mobile": mobile, "skus": skus, "date": date}
+
+
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
 def process_sale_orders(dry_run: bool = False) -> dict:
     print(f"[CONFIG] SPREADSHEET_ID={'SET' if SPREADSHEET_ID else 'MISSING'} | SHEET_TAB={SHEET_TAB} | CREDENTIALS={'SET' if CREDENTIALS_JSON else 'MISSING'}")
@@ -513,6 +914,7 @@ def process_sale_orders(dry_run: bool = False) -> dict:
     orders  = _group_rows_into_orders(records)
     url     = f"{TENANT_URL}/services/rest/v1/oms/saleOrder/create"
     results = {"success": 0, "failed": 0, "skipped": 0, "errors": [], "dry_run_payloads": []}
+    placed  = {}  # tracks successfully placed orders for writeback
 
     for order_code, order_data in orders.items():
         facility = order_data.pop("_facility_code", "")
@@ -557,6 +959,7 @@ def process_sale_orders(dry_run: bool = False) -> dict:
                 uc_code = data.get("saleOrderDetailDTO", {}).get("code", order_code)
                 results["success"] += 1
                 print(f"  ✔ [UNICOMMERCE] Order {order_code} accepted → {uc_code}")
+                _track_placed(placed, order_code, order_data)
             else:
                 errors = data.get("errors", [])
                 msg    = errors[0].get("description") if errors else data.get("message", "Unknown error")
@@ -565,6 +968,7 @@ def process_sale_orders(dry_run: bool = False) -> dict:
                 if "duplicate" in str(msg).lower() or "already exist" in str(msg).lower():
                     results["success"] += 1
                     print(f"  ✔ [UNICOMMERCE] Order {order_code} already exists in Unicommerce — skipping")
+                    _track_placed(placed, order_code, order_data)
                 else:
                     results["failed"] += 1
                     results["errors"].append({"order_id": order_code, "error": msg})
@@ -586,6 +990,11 @@ def process_sale_orders(dry_run: bool = False) -> dict:
                 print(f"  ✗ [PYTHON] Order {order_code} — unexpected exception: {err_str}")
 
     print(f"SUMMARY → total: {len(orders)}, success: {results['success']}, failed: {results['failed']}, skipped: {results['skipped']}")
+
+    if not dry_run:
+        _write_order_ids_back(placed)
+
     return results
+
 
 
