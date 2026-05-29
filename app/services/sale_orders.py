@@ -610,10 +610,11 @@ SCOPES = [
 ]
 
 # IM Orders column indices (0-based)
-_IM_DATE_COL     = 0   # A
-_IM_MOBILE_COL   = 2   # C
-_IM_SKU_COL      = 9   # J
-_IM_ORDER_ID_COL = 15  # P  ← only column we write to
+_IM_DATE_COL     = 0   # A — Date
+_IM_MOBILE_COL   = 2   # C — *CustomerMobile
+_IM_PINCODE_COL  = 8   # I — *Shipping Address Postcode
+_IM_SKU_COL      = 9   # J — *Master SKU
+_IM_ORDER_ID_COL = 15  # P — Order ID  ← only column we write to
 
 
 # ── GOOGLE SHEETS CLIENT ──────────────────────────────────────────────────────
@@ -628,10 +629,15 @@ def _get_sheet():
 def _write_order_ids_back(placed: dict) -> None:
     """
     Write Unicommerce INF codes to Order ID column (P) in IM Orders.
-    Matches rows by date + mobile + sku. Only updates blank Order ID cells.
-    Never touches any other column. Errors are logged, never raised.
+    Matches rows by date + mobile + pincode + sku — four-field key ensures
+    two separate orders on the same day with the same SKU never clash.
+    Only updates blank Order ID cells. Never touches any other column.
+    Errors are logged, never raised.
 
-    placed = {"INF2017": {"mobile": "9310986991", "skus": {"BL003"}, "date": "28-05-2026"}}
+    placed = {
+        "INF2037": {"mobile": "9310986991", "pincode": "122016",
+                    "skus": {"BL003"}, "date": "28-05-2026"}
+    }
     """
     if not placed or not MAIN_SHEET_ID:
         if not MAIN_SHEET_ID:
@@ -648,9 +654,9 @@ def _write_order_ids_back(placed: dict) -> None:
             print("[WRITEBACK] Header row not found in IM Orders — aborting")
             return
 
-        # Build lookup: (date, mobile, sku) → inf_code
+        # Build lookup: (date, mobile, pincode, sku) → inf_code
         lookup = {
-            (info["date"], info["mobile"], sku): code
+            (info["date"], info["mobile"], info["pincode"], sku): code
             for code, info in placed.items()
             for sku in info["skus"]
         }
@@ -659,13 +665,14 @@ def _write_order_ids_back(placed: dict) -> None:
         for offset, row in enumerate(rows[header_idx + 1:]):
             date     = row[_IM_DATE_COL].strip()     if len(row) > _IM_DATE_COL     else ""
             mobile   = row[_IM_MOBILE_COL].strip()   if len(row) > _IM_MOBILE_COL   else ""
+            pincode  = row[_IM_PINCODE_COL].strip()  if len(row) > _IM_PINCODE_COL  else ""
             sku      = row[_IM_SKU_COL].strip()      if len(row) > _IM_SKU_COL      else ""
             order_id = row[_IM_ORDER_ID_COL].strip() if len(row) > _IM_ORDER_ID_COL else ""
 
             if not mobile or not sku or order_id:
                 continue  # skip empty rows or already-written rows
 
-            code = lookup.get((date, mobile, sku))
+            code = lookup.get((date, mobile, pincode, sku))
             if code:
                 sheet_row = header_idx + offset + 2  # 1-based sheet row
                 updates.append(gspread.Cell(row=sheet_row, col=_IM_ORDER_ID_COL + 1, value=code))
@@ -866,16 +873,18 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
 
 # ── TRACK SUCCESSFULLY PLACED ORDERS ─────────────────────────────────────────
 def _track_placed(placed: dict, order_code: str, order_data: dict) -> None:
-    so     = order_data["saleOrder"]
-    mobile = so["addresses"][0].get("phone", "") if so.get("addresses") else ""
-    skus   = {item["itemSku"] for item in so.get("saleOrderItems", [])}
+    so      = order_data["saleOrder"]
+    addr    = so["addresses"][0] if so.get("addresses") else {}
+    mobile  = addr.get("phone", "")
+    pincode = addr.get("pincode", "")
+    skus    = {item["itemSku"] for item in so.get("saleOrderItems", [])}
     raw_date = so.get("displayOrderDateTime", "")
     try:
         date = datetime.strptime(raw_date[:10], "%Y-%m-%d").strftime("%d-%m-%Y") if raw_date else \
                datetime.now().strftime("%d-%m-%Y")
     except ValueError:
         date = datetime.now().strftime("%d-%m-%Y")
-    placed[order_code] = {"mobile": mobile, "skus": skus, "date": date}
+    placed[order_code] = {"mobile": mobile, "pincode": pincode, "skus": skus, "date": date}
 
 
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
@@ -995,6 +1004,7 @@ def process_sale_orders(dry_run: bool = False) -> dict:
         _write_order_ids_back(placed)
 
     return results
+
 
 
 
