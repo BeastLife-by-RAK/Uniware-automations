@@ -599,8 +599,10 @@ from google.oauth2.service_account import Credentials
 from app.services.auth import api_post, TENANT_URL
 
 # ── SHEET CONFIG ──────────────────────────────────────────────────────────────
+# INFLUENCER_SHEET_ID must be set to the same value as MAIN_SHEET_ID in the
+# Next.js app — the "Daily Orders" tab is written there by the 8:30 PM cron.
 SPREADSHEET_ID   = os.getenv("INFLUENCER_SHEET_ID")
-SHEET_TAB        = os.getenv("INFLUENCER_SHEET_TAB", "Sheet1")
+SHEET_TAB        = os.getenv("INFLUENCER_SHEET_TAB", "Daily Orders")
 CREDENTIALS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
 MAIN_SHEET_ID    = os.getenv("MAIN_SHEET_ID", "")   # main sheet for order-ID writeback
 
@@ -973,11 +975,12 @@ def process_sale_orders(dry_run: bool = False) -> dict:
                 errors = data.get("errors", [])
                 msg    = errors[0].get("description") if errors else data.get("message", "Unknown error")
 
-                # Unicommerce rejects duplicate orders — treat as already done, not a failure
+                # Unicommerce rejects duplicate orders — treat as already done, not a failure.
+                # Do NOT call _track_placed here: the order was not newly placed, so writing
+                # the INF code back to IM Orders col P would be incorrect.
                 if "duplicate" in str(msg).lower() or "already exist" in str(msg).lower():
                     results["success"] += 1
                     print(f"  ✔ [UNICOMMERCE] Order {order_code} already exists in Unicommerce — skipping")
-                    _track_placed(placed, order_code, order_data)
                 else:
                     results["failed"] += 1
                     results["errors"].append({"order_id": order_code, "error": msg})
