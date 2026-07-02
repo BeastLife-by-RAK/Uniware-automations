@@ -850,7 +850,7 @@ def _group_rows_into_orders(records: list[dict]) -> dict[str, dict]:
                 "code":               item_code,
                 "itemSku":            sku,
                 "shippingMethodCode": "STD",
-                "facilityCode":       "",
+                "facilityCode":       _s(row, "Facility Code"),
                 "channelProductId":   sku,
                 "packetNumber":       1,
                 "giftWrap":           gift_wrap,
